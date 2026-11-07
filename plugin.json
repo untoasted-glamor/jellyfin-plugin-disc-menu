@@ -1,0 +1,10 @@
+{
+    "name": "Disc Menu",
+    "guid": "bea19561-f7f9-44d6-a4d2-c46b41d04a94",
+    "targetAbi": "12.0.0.0",
+    "overview": "Play a disc's own title screen and menus in Jellyfin",
+    "description": "Plays the title screen and menus extracted from a DVD or Blu-ray, next to the episodes they start.",
+    "category": "General",
+    "owner": "untoasted-glamor",
+    "artifacts": ["Jellyfin.Plugin.DiscMenu.dll"]
+}

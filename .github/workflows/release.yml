@@ -1,0 +1,57 @@
+name: Release
+
+# Push a tag like v0.1.0 on main. This builds the plugin, attaches the zip to a GitHub Release
+# and adds the version to manifest.json on main, which Jellyfin's Catalog reads.
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    env:
+      TAG: ${{ github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 10.0.x
+      - name: Check the tag
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "tag must look like v1.2.3, got $TAG"; exit 1; }
+          git fetch --force origin "refs/tags/$TAG:refs/tags/$TAG" main:refs/remotes/origin/main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "$TAG is not on main"; exit 1; }
+          echo "VERSION=${TAG#v}.0" >> "$GITHUB_ENV"
+          notes=$(git tag -l --format='%(contents)' "$TAG")
+          [ -n "$notes" ] || notes="Release $TAG"
+          { echo 'CHANGELOG<<EOF_NOTES'; echo "$notes"; echo 'EOF_NOTES'; } >> "$GITHUB_ENV"
+      - name: Build
+        run: >
+          dotnet publish Jellyfin.Plugin.DiscMenu/Jellyfin.Plugin.DiscMenu.csproj -c Release -o publish
+          -p:Version="$VERSION" -p:AssemblyVersion="$VERSION" -p:FileVersion="$VERSION"
+      - name: Package
+        run: |
+          zip=$(python3 scripts/package.py package --version "$VERSION" --publish-dir publish --out dist --changelog "$CHANGELOG")
+          echo "ZIP=$zip" >> "$GITHUB_ENV"
+      - name: Publish the GitHub Release
+        run: gh release create "$TAG" "$ZIP" --title "$TAG" --notes "$CHANGELOG" --verify-tag
+      - name: Add the version to manifest.json on main
+        run: |
+          url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/$(basename "$ZIP")"
+          git checkout -B main origin/main
+          python3 scripts/package.py manifest --zip "$ZIP" --url "$url"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add manifest.json
+          git commit -m "chore: add $TAG to manifest.json"
+          git push origin main
