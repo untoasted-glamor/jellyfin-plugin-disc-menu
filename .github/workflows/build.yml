@@ -16,6 +16,18 @@ jobs:
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: 10.0.x
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Web player (type check, tests, build)
+        working-directory: web
+        run: |
+          npm ci --no-audit --no-fund --ignore-scripts
+          npm run check
+          npm test
+          npm run build
       - name: Build
         run: dotnet publish Jellyfin.Plugin.DiscMenu/Jellyfin.Plugin.DiscMenu.csproj -c Release -o publish
       - name: Package (check only)

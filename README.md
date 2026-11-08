@@ -24,11 +24,27 @@ Updates appear in the same Catalog, and each one needs a restart too. To remove 
 
 ## Build
 
-Needs the .NET 10 SDK.
+Needs the .NET 10 SDK and Node.js 22.
 
 ```bash
 dotnet publish Jellyfin.Plugin.DiscMenu/Jellyfin.Plugin.DiscMenu.csproj -c Release -o publish
 ```
+
+### Menu player page
+
+The player page is TypeScript in [web/](web/): a DVD VM that runs a disc's own navigation commands
+(`src/dvdvm.ts`, after libdvdnav), the menu renderer (`src/player.ts`) and playback through Jellyfin's HLS
+stream with hls.js (`src/playback.ts`). `npm run build` writes the page to `web/dist/`, with hls.js bundled.
+
+```bash
+cd web
+npm ci --ignore-scripts
+npm run check    # type check
+npm test         # VM scenarios on the Sintel fixture
+npm run serve    # http://127.0.0.1:8098/dist/index.html?pack=../fixtures/sintel/ (stub playback)
+```
+
+Test fixtures come from the Sintel DVD only (see [NOTICE](NOTICE)).
 
 ## Release
 
@@ -43,4 +59,4 @@ git push origin v0.1.0
 
 ## License
 
-GPL-3.0, like Jellyfin and its plugin template.
+GPL-3.0, like Jellyfin and its plugin template. Third-party material is listed in [NOTICE](NOTICE).

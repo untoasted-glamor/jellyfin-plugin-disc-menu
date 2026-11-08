@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en" data-server-root="../">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Disc menu</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1 id="disc-name">Disc menu</h1>
+  <div class="keys">
+    <button type="button" id="btn-menu" title="M or Esc">Menu</button>
+    <button type="button" id="btn-title" title="T">Title menu</button>
+    <button type="button" id="btn-restart">Restart</button>
+  </div>
+</header>
+
+<main>
+  <div id="stage" class="stage">
+    <div id="menu" class="menu" hidden></div>
+    <div id="title" class="title" hidden></div>
+    <div class="splash">
+      <p>Plays the disc's own navigation from first play. Arrows move, Enter selects, M or Esc is the
+      Menu key, T the Title menu. Mouse and touch work too.</p>
+      <button type="button" id="start">Start disc</button>
+    </div>
+  </div>
+  <div id="status" class="status" role="status"></div>
+
+  <details class="panel">
+    <summary>Jellyfin</summary>
+    <p>Titles stream from this Jellyfin server with an API key (Dashboard &gt; API Keys). The key stays in
+    this browser only. Without one, title cells show what would play.</p>
+    <div class="form">
+      <label>API key <input id="jf-key" type="password" autocomplete="off" spellcheck="false"></label>
+      <button type="button" id="jf-connect">Connect</button>
+    </div>
+    <p id="jf-state" class="muted">Not connected: title cells show what would play.</p>
+  </details>
+
+  <details class="panel">
+    <summary>VM state and trace</summary>
+    <pre id="regs"></pre>
+    <pre id="trace" class="trace"></pre>
+  </details>
+</main>
+<script type="module" src="player.js"></script>
+</body>
+</html>
