@@ -2,24 +2,11 @@
 // transcodes to H.264/AAC and burns in the chosen subtitle); StubPlayback only shows what would play and runs
 // a clock, so the menus can be tested without a server.
 import Hls from "hls.js";
-import type { MediaCell } from "./dvdvm.js";
+import { DiscInfo, DiscMedia, MediaItem, pickStreams, PlayRequest, requestKey, subtitleLabel } from "./media.js";
+
+export * from "./media.js";
 
 declare const __PLAYER_VERSION__: string;
-
-export interface PlayRequest {
-  /** Which file: "E<n>" for a series episode, "F:<file name>" for a movie (see mediaKey). */
-  media: string;
-  /** What the viewer sees for it: "S01E03" or the movie's file name. */
-  title: string;
-  offset: number;
-  /** How long the file is, as far as the pack knows (the end of its last cell). */
-  length: number;
-  audioLang3: string | null;
-  /** The chosen subtitle: its sidecar file's suffix when the pack pairs one, and its language. */
-  sidecar: string | null;
-  subLang3: string | null;
-  label: string;
-}
 
 export interface Playback {
   readonly el: HTMLElement;
@@ -32,14 +19,6 @@ export interface Playback {
   onended: () => void;
   onerror: (msg: string) => void;
 }
-
-/** A series episode is found by its number (file names change after a rip); a movie by its file name. */
-export const mediaKey = (m: MediaCell): string => (m.episode !== undefined ? `E${m.episode}` : `F:${m.file}`);
-
-export const requestKey = (r: PlayRequest) => `${r.media}|${r.audioLang3}|${r.sidecar}|${r.subLang3}`;
-
-/** How a request's subtitle reads in the status line. */
-export const subtitleLabel = (r: PlayRequest) => r.sidecar ?? r.subLang3 ?? "off";
 
 // ---------------------------------------------------------------------------- stub
 
@@ -136,21 +115,6 @@ export function fmt(s: number): string {
 
 // ---------------------------------------------------------------------------- Jellyfin
 
-interface Stream {
-  Index: number;
-  Type: string;
-  Language?: string;
-  Path?: string;
-  IsExternal?: boolean;
-  DisplayTitle?: string;
-}
-export interface MediaItem {
-  id: string;
-  name: string;
-  mediaSourceId: string;
-  streams: Stream[];
-}
-
 /** The Jellyfin server this page is served from. Every URL is relative to it, so a base URL such as /jellyfin works. */
 export function serverRoot(): string {
   return new URL(document.documentElement.dataset.serverRoot ?? "../", location.href).href;
@@ -179,32 +143,27 @@ export class Jellyfin {
 
   async get<T>(path: string): Promise<T> {
     const r = await fetch(this.base + path, { headers: { Authorization: this.auth() } });
-    if (!r.ok) throw new Error(`${r.status} ${r.statusText} for ${path.split("?")[0]}`);
+    if (!r.ok) throw new HttpError(r.status, `${r.status} ${r.statusText} for ${path.split("?")[0]}`);
     return (await r.json()) as T;
   }
 
-  /** Find the series by name and its season's episodes, keyed by mediaKey. */
-  async resolveSeries(name: string, season: number): Promise<{ title: string; items: Map<string, MediaItem> }> {
-    const users = await this.get<{ Id: string; Name: string; Policy?: { IsAdministrator?: boolean } }[]>("Users");
-    const user = users.find((u) => u.Policy?.IsAdministrator) ?? users[0];
-    if (!user) throw new Error("no Jellyfin user");
-    const all = await this.get<{ Items: { Id: string; Name: string }[] }>(
-      `Items?userId=${user.Id}&IncludeItemTypes=Series&Recursive=true`,
-    );
-    const lc = name.toLowerCase();
-    const s =
-      all.Items.find((i) => i.Name.toLowerCase() === lc) ??
-      all.Items.find((i) => i.Name.toLowerCase().includes(lc.split(" ")[0]));
-    if (!s) throw new Error(`series not found: ${name}`);
-    const eps = await this.get<{
-      Items: { Id: string; Name: string; IndexNumber?: number; MediaSources?: { Id: string; MediaStreams: Stream[] }[] }[];
-    }>(`Shows/${s.Id}/Episodes?userId=${user.Id}&season=${season}&Fields=MediaSources,MediaStreams,Path`);
-    const items = new Map<string, MediaItem>();
-    for (const e of eps.Items) {
-      const ms = e.MediaSources?.[0];
-      if (e.IndexNumber && ms) items.set(`E${e.IndexNumber}`, { id: e.Id, name: e.Name, mediaSourceId: ms.Id, streams: ms.MediaStreams });
-    }
-    return { title: s.Name, items };
+  /** A URL for an element that can't send a header (img, video, audio): the token goes in ApiKey=. */
+  withKey(url: string): string {
+    return `${url}${url.includes("?") ? "&" : "?"}ApiKey=${encodeURIComponent(this.key)}`;
+  }
+
+  /** The plugin's address for a series' or movie's packs. */
+  discsPath(item: string): string {
+    return `DiscMenu/Items/${encodeURIComponent(item)}/Discs`;
+  }
+
+  discs(item: string): Promise<DiscInfo[]> {
+    return this.get<DiscInfo[]>(this.discsPath(item));
+  }
+
+  /** Which library item plays each file the pack names, with its streams (looked up on every call). */
+  media(item: string, disc: string): Promise<DiscMedia> {
+    return this.get<DiscMedia>(`${this.discsPath(item)}/${encodeURIComponent(disc)}/Media`);
   }
 
   streamUrl(item: MediaItem, audio: number | null, sub: number | null, playSessionId: string): string {
@@ -239,6 +198,15 @@ export class Jellyfin {
   }
 }
 
+export class HttpError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
 export class JellyfinPlayback implements Playback {
   readonly el: HTMLVideoElement;
   key: string | null = null;
@@ -260,21 +228,11 @@ export class JellyfinPlayback implements Playback {
     this.el.addEventListener("ended", () => this.onended());
   }
 
-  /**
-   * The Jellyfin stream indexes a request maps to (null = Jellyfin's default / none). A subtitle is the sidecar
-   * file the pack names, else the file's first subtitle stream in the chosen language.
-   */
+  /** The item and Jellyfin stream indexes a request maps to (see pickStreams). */
   pick(r: PlayRequest): { item: MediaItem; audio: number | null; sub: number | null } {
     const item = this.items.get(r.media);
     if (!item) throw new Error(`${r.title} isn't in Jellyfin`);
-    const audio = r.audioLang3
-      ? (item.streams.find((s) => s.Type === "Audio" && s.Language === r.audioLang3)?.Index ?? null)
-      : null;
-    const subs = item.streams.filter((s) => s.Type === "Subtitle");
-    const sub =
-      (r.sidecar ? subs.find((s) => s.IsExternal && (s.Path ?? "").endsWith(r.sidecar!)) : undefined) ??
-      (r.subLang3 ? subs.find((s) => !s.IsExternal && s.Language === r.subLang3) : undefined);
-    return { item, audio, sub: sub?.Index ?? null };
+    return { item, ...pickStreams(item.streams, r) };
   }
 
   async load(r: PlayRequest): Promise<void> {
