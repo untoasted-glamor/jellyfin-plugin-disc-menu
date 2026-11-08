@@ -4,6 +4,7 @@ using System.ComponentModel.DataAnnotations;
 using System.Globalization;
 using System.Security.Claims;
 using Jellyfin.Database.Implementations.Entities;
+using Jellyfin.Plugin.DiscMenu.Media;
 using Jellyfin.Plugin.DiscMenu.Packs;
 using Jellyfin.Plugin.DiscMenu.Web;
 using MediaBrowser.Controller.Entities;
@@ -33,6 +34,7 @@ public class DiscMenuController : ControllerBase
     private readonly ILibraryManager _libraryManager;
     private readonly IUserManager _userManager;
     private readonly PackStore _packs;
+    private readonly MediaLookup _media;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="DiscMenuController"/> class.
@@ -40,11 +42,13 @@ public class DiscMenuController : ControllerBase
     /// <param name="libraryManager">The library manager.</param>
     /// <param name="userManager">The user manager.</param>
     /// <param name="packs">The menu pack store.</param>
-    public DiscMenuController(ILibraryManager libraryManager, IUserManager userManager, PackStore packs)
+    /// <param name="media">The lookup from a pack's files to library items.</param>
+    public DiscMenuController(ILibraryManager libraryManager, IUserManager userManager, PackStore packs, MediaLookup media)
     {
         _libraryManager = libraryManager;
         _userManager = userManager;
         _packs = packs;
+        _media = media;
     }
 
     /// <summary>
@@ -102,13 +106,13 @@ public class DiscMenuController : ControllerBase
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public ActionResult<IReadOnlyList<DiscInfo>> GetDiscs([FromRoute, Required] Guid itemId)
     {
-        var lookup = FindItemFolder(itemId);
+        var lookup = FindItem(itemId);
         if (lookup.Result is not null)
         {
             return lookup.Result;
         }
 
-        return Ok(_packs.ListDiscs(lookup.Folder!));
+        return Ok(_packs.ListDiscs(lookup.Item!.ContainingFolderPath));
     }
 
     /// <summary>
@@ -129,13 +133,13 @@ public class DiscMenuController : ControllerBase
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public ActionResult GetFile([FromRoute, Required] Guid itemId, [FromRoute, Required] string disc, [FromRoute] string? path)
     {
-        var lookup = FindItemFolder(itemId);
+        var lookup = FindItem(itemId);
         if (lookup.Result is not null)
         {
             return lookup.Result;
         }
 
-        var file = _packs.ResolveFile(lookup.Folder!, disc, path);
+        var file = _packs.ResolveFile(lookup.Item!.ContainingFolderPath, disc, path);
         if (file is null)
         {
             return NotFound();
@@ -151,9 +155,43 @@ public class DiscMenuController : ControllerBase
         return PhysicalFile(file, contentType, enableRangeProcessing: true);
     }
 
-    // The folder of a series or movie the caller may see. An API key sees every item, as it does in Jellyfin's own
-    // API; a user's token sees what that user can see. A hidden item is reported as missing, so its id leaks nothing.
-    private (string? Folder, ActionResult? Result) FindItemFolder(Guid itemId)
+    /// <summary>
+    /// Maps each file a pack's title cells play to the Jellyfin item, media source and streams that play it: for a
+    /// series by the pack's season and the episode number, for a movie by file name among its versions.
+    /// </summary>
+    /// <param name="itemId">The series or movie.</param>
+    /// <param name="disc">The pack's folder name.</param>
+    /// <response code="200">Each file the pack names; one the library lacks has no <c>ItemId</c>.</response>
+    /// <response code="403">The token belongs to no known user.</response>
+    /// <response code="404">No such item or pack, or the pack's <c>menu.json</c> can't be read.</response>
+    /// <returns>The pack's files and what plays them.</returns>
+    [HttpGet("Items/{itemId}/Discs/{disc}/Media")]
+    [Authorize]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public ActionResult<DiscMedia> GetMedia([FromRoute, Required] Guid itemId, [FromRoute, Required] string disc)
+    {
+        var lookup = FindItem(itemId);
+        if (lookup.Result is not null)
+        {
+            return lookup.Result;
+        }
+
+        var titles = _packs.ReadTitles(lookup.Item!.ContainingFolderPath, disc);
+        if (titles is null)
+        {
+            return NotFound();
+        }
+
+        Response.Headers.CacheControl = "private, no-cache";
+        return Ok(_media.Map(lookup.Item, titles, lookup.User));
+    }
+
+    // A series or movie the caller may see, and the caller's user (null for an API key). An API key sees every item,
+    // as it does in Jellyfin's own API; a user's token sees what that user can see. A hidden item is reported as
+    // missing, so its id leaks nothing.
+    private (BaseItem? Item, User? User, ActionResult? Result) FindItem(Guid itemId)
     {
         User? user = null;
         if (!IsApiKey(User))
@@ -162,17 +200,17 @@ public class DiscMenuController : ControllerBase
             user = userId is null ? null : _userManager.GetUserById(userId.Value);
             if (user is null)
             {
-                return (null, Forbid());
+                return (null, null, Forbid());
             }
         }
 
         var item = _libraryManager.GetItemById<BaseItem>(itemId, user);
         if (item is not (Movie or Series) || string.IsNullOrEmpty(item.ContainingFolderPath))
         {
-            return (null, NotFound());
+            return (null, null, NotFound());
         }
 
-        return (item.ContainingFolderPath, null);
+        return (item, user, null);
     }
 
     private static bool IsApiKey(ClaimsPrincipal principal)

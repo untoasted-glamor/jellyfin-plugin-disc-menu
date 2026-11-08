@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
@@ -129,6 +130,50 @@ public sealed class PackStore
     }
 
     /// <summary>
+    /// Reads which files a pack's title cells play: each distinct episode number, or file name when a cell has no
+    /// episode. A cell without a file name is skipped.
+    /// </summary>
+    /// <param name="itemFolder">The series or movie folder.</param>
+    /// <param name="disc">The pack's folder name.</param>
+    /// <returns>The pack's season and files, or <c>null</c> when the pack is missing or its <c>menu.json</c>
+    /// can't be read.</returns>
+    public PackTitles? ReadTitles(string itemFolder, string disc)
+    {
+        var menu = ResolveFile(itemFolder, disc, MenuFile);
+        if (menu is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            using var stream = File.OpenRead(menu);
+            var pack = JsonSerializer.Deserialize<PackMedia>(stream, _jsonOptions);
+            if (pack is null)
+            {
+                return null;
+            }
+
+            var cells = (pack.Media ?? []).Values
+                .SelectMany(pgc => (pgc.Cells ?? []).Values)
+                .Where(cell => !string.IsNullOrEmpty(cell.File));
+            var titles = cells
+                .Select(cell => new PackTitle(cell.Episode, cell.File!))
+                .DistinctBy(title => title.Episode?.ToString(CultureInfo.InvariantCulture) ?? "F:" + title.File)
+                .OrderBy(title => title.Episode is null)
+                .ThenBy(title => title.Episode)
+                .ThenBy(title => title.File, StringComparer.Ordinal)
+                .ToList();
+            return new PackTitles(pack.Disc?.Season, titles);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+        {
+            _logger.LogWarning(ex, "Can't read the titles of menu pack {Disc} at {Path}", disc, menu);
+            return null;
+        }
+    }
+
+    /// <summary>
     /// Whether a disc folder name or one segment of a pack path is safe to join to a folder: not empty, no
     /// leading dot (so no <c>.</c>, <c>..</c> or hidden files), and none of <c>/ \ : %</c> or control characters.
     /// </summary>
@@ -224,5 +269,29 @@ public sealed class PackStore
 
         [JsonPropertyName("season")]
         public int? Season { get; set; }
+    }
+
+    private sealed class PackMedia
+    {
+        [JsonPropertyName("disc")]
+        public PackDisc? Disc { get; set; }
+
+        [JsonPropertyName("media")]
+        public Dictionary<string, PackMediaPgc>? Media { get; set; }
+    }
+
+    private sealed class PackMediaPgc
+    {
+        [JsonPropertyName("cells")]
+        public Dictionary<string, PackMediaCell>? Cells { get; set; }
+    }
+
+    private sealed class PackMediaCell
+    {
+        [JsonPropertyName("file")]
+        public string? File { get; set; }
+
+        [JsonPropertyName("episode")]
+        public int? Episode { get; set; }
     }
 }
