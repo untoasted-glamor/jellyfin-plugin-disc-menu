@@ -149,14 +149,16 @@ Test fixtures come from the Sintel DVD only (see [NOTICE](NOTICE)).
 
 ## Release
 
-Push a tag like `v0.1.0` on `main`. The annotated tag's message becomes the changelog. The
-[release workflow](.github/workflows/release.yml) builds the plugin, attaches the zip to a GitHub Release
-and adds the version to `manifest.json` on `main`.
+Either push an annotated tag like `v0.1.0` on `main` (its message becomes the changelog):
 
 ```bash
 git tag -a v0.1.0 -m "First release: an empty plugin that installs from the Catalog"
 git push origin v0.1.0
 ```
+
+or, in the GitHub UI, draft a new release, create the tag `v0.1.0` on `main` there, and publish it (its description
+becomes the changelog). Either way the [release workflow](.github/workflows/release.yml) builds the plugin, attaches
+the zip to the GitHub Release and adds the version to `manifest.json` on `main`.
 
 ## License
 

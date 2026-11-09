@@ -1,10 +1,16 @@
 name: Release
 
-# Push a tag like v0.1.0 on main. This builds the plugin, attaches the zip to a GitHub Release
-# and adds the version to manifest.json on main, which Jellyfin's Catalog reads.
+# Either way builds the plugin, attaches the zip to the GitHub Release and adds the version to manifest.json on main,
+# which Jellyfin's Catalog reads:
+# - push an annotated tag like v0.1.0 on main: its message is the changelog, and this makes the GitHub Release;
+# - or publish a release in the GitHub UI with a new tag like v0.1.0 on main: its description is the changelog.
+# The UI's new tag also starts the tag push run; that run stops when the release already exists, and the steps after
+# it skip what is already done, so the two runs never publish twice.
 on:
   push:
     tags: ['v*.*.*']
+  release:
+    types: [published]
 
 permissions:
   contents: write
@@ -17,7 +23,7 @@ jobs:
   release:
     runs-on: ubuntu-24.04
     env:
-      TAG: ${{ github.ref_name }}
+      TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || github.ref_name }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -32,15 +38,28 @@ jobs:
           git fetch --force origin "refs/tags/$TAG:refs/tags/$TAG" main:refs/remotes/origin/main
           git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "$TAG is not on main"; exit 1; }
           echo "VERSION=${TAG#v}.0" >> "$GITHUB_ENV"
-          notes=$(git tag -l --format='%(contents)' "$TAG")
-          [ -n "$notes" ] || notes="Release $TAG"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            if [ "$GITHUB_EVENT_NAME" = push ]; then
+              echo "The GitHub Release $TAG exists (published in the UI): its own run builds it."
+              echo "SKIP=1" >> "$GITHUB_ENV"
+              exit 0
+            fi
+            notes=$(gh release view "$TAG" --json body -q .body | tr -d '\r')
+          fi
+          # An annotated tag's message; a lightweight tag (the UI's) has none, only its commit's.
+          if [ -z "${notes:-}" ] && [ "$(git cat-file -t "refs/tags/$TAG")" = tag ]; then
+            notes=$(git tag -l --format='%(contents)' "$TAG")
+          fi
+          [ -n "${notes:-}" ] || notes="Release $TAG"
           { echo 'CHANGELOG<<EOF_NOTES'; echo "$notes"; echo 'EOF_NOTES'; } >> "$GITHUB_ENV"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: env.SKIP != '1'
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: web/package-lock.json
       - name: Web player (type check, tests, build)
+        if: env.SKIP != '1'
         working-directory: web
         run: |
           npm ci --no-audit --no-fund --ignore-scripts
@@ -48,21 +67,35 @@ jobs:
           npm test
           npm run build
       - name: Test
+        if: env.SKIP != '1'
         run: dotnet test --solution Jellyfin.Plugin.DiscMenu.slnx -c Release
       - name: Build
+        if: env.SKIP != '1'
         run: >
           dotnet publish Jellyfin.Plugin.DiscMenu/Jellyfin.Plugin.DiscMenu.csproj -c Release -o publish
           -p:Version="$VERSION" -p:AssemblyVersion="$VERSION" -p:FileVersion="$VERSION"
       - name: Package
+        if: env.SKIP != '1'
         run: |
           zip=$(python3 scripts/package.py package --version "$VERSION" --publish-dir publish --out dist --changelog "$CHANGELOG")
           echo "ZIP=$zip" >> "$GITHUB_ENV"
       - name: Publish the GitHub Release
-        run: gh release create "$TAG" "$ZIP" --title "$TAG" --notes "$CHANGELOG" --verify-tag
+        if: env.SKIP != '1'
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$ZIP" --clobber
+          else
+            gh release create "$TAG" "$ZIP" --title "$TAG" --notes "$CHANGELOG" --verify-tag
+          fi
       - name: Add the version to manifest.json on main
+        if: env.SKIP != '1'
         run: |
           url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/$(basename "$ZIP")"
           git checkout -B main origin/main
+          if grep -q "\"version\": \"$VERSION\"" manifest.json; then
+            echo "manifest.json already lists $VERSION"
+            exit 0
+          fi
           python3 scripts/package.py manifest --zip "$ZIP" --url "$url"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
