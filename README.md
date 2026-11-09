@@ -2,10 +2,10 @@
 
 A Jellyfin plugin that plays a DVD's or Blu-ray's own title screen and menus, next to the episodes they start.
 
-**Status:** v0.3 plays a DVD's menus in the web client. A series or movie with a menu pack gets a "Disc menu"
-button next to Play (it needs the [JavaScript Injector](#disc-menu-button) plugin); the player signs in as the
-viewer, runs the disc's own menus and plays the titles they start from the library, with the audio and subtitles
-chosen in the menus. Blu-ray menus and a phone as the remote for a TV come in later releases. Nothing in this repo makes packs yet; see [Menu packs](#menu-packs) for what one holds.
+**Status:** v0.4 plays a DVD's menus in the web client. A series or movie with a menu pack gets a "Disc menu"
+button next to Play (it needs the [JavaScript Injector](#disc-menu-button) plugin). The button opens the disc's own
+menus full screen; a title picked in them plays in Jellyfin's own player, like any episode, with the audio and
+subtitles chosen in the menus. Blu-ray menus and a phone as the remote for a TV come in later releases. Nothing in this repo makes packs yet; see [Menu packs](#menu-packs) for what one holds.
 
 Requires Jellyfin 12.0 or later.
 
@@ -48,7 +48,8 @@ the movie even when the file was renamed. Stream indexes are looked up on every 
 file shifts them.
 
 The player page opens a pack with `DiscMenu/Player/?item={itemId}`, and `&disc={disc}` when the item has more
-than one. Every call uses the viewer's own account:
+than one. Opened that way, by hand, it plays nothing from the library: a title shows what would play and what the
+Disc menu button would hand to the web client's player. Every call uses the viewer's own account:
 
 - In a browser the page shares the web client's origin, so it reuses the web client's saved login for the same
   server (`jellyfin_credentials` in local storage, matched by server id). That token is sent on its own, with no
@@ -70,10 +71,25 @@ switch for the button is set back on at the next start; to hide the button, unin
 
 - The loader runs once someone is signed in and adds `DiscMenu/Inject/button.js` from the web client's own server
   root, so it works under a base URL. The button script comes from the plugin's DLL, never from another site.
-- The button opens the player full screen over the web client, in a frame on the same origin, so it reuses the web
-  client's login. That also works in the Android app, which shows the web client.
-- Close (or Back, Escape on the bar, or a remote's Back key in the player) stops the playing title and its transcode,
-  then removes the overlay; Back doesn't leave the item's page.
+- The button opens the menu full screen over the web client, in a frame on the same origin, so it reuses the web
+  client's login (and only that login). That also works in the Android app, which shows the web client: there the
+  menu goes full screen and landscape the way an episode does. The menu starts at once; if the browser holds back
+  its sound, a Start button shows.
+- Only the menu shows, letterboxed on black. A bar with Close, Menu and Title menu comes up on mouse move, on a tap
+  beside the menu's buttons, or with a remote's Info key, and goes again after a few seconds. Arrows, Enter, M (Menu)
+  and T (Title menu) drive the menu. Escape leaves full screen, as browsers keep it for that.
+- Close (or Back, or a remote's Back key) removes the overlay; Back doesn't leave the item's page.
+- When the disc starts a title the library has, the menu goes and the web client's own player plays that episode or
+  film, as if the viewer had pressed Play on it, starting where the menu points: it never resumes a part-watched
+  episode. There is no way back from the episode to the menu. Watched state, resume points and Next Up change as for
+  any episode, and the next episodes are queued. Audio and subtitles go along only when the viewer changed them in the
+  disc's menus; otherwise Jellyfin picks them from the user's settings. With cinema mode on, a title started from the
+  top can get Jellyfin's intros first, as with the Play button. The title plays wherever the web client plays (on a
+  cast target when it is casting).
+- The hand-off is a Play command from the server to the web client's own session (as a remote control sends). If no
+  playback starts within 15 seconds, the title's details page opens instead, with its own Play button.
+- Titles the disc starts before the viewer pressed any menu button (logos and warnings at first play) are skipped,
+  so the disc gets to its menu.
 - The button script runs with the viewer's login inside the web client, so it builds every element with
   `createElement` and `textContent`, never from markup, and only uses addresses on the page's own origin. The player
   page works the same way, and its routes send a strict Content-Security-Policy (its own scripts only, framed by this
@@ -98,16 +114,16 @@ The C# tests are in [tests/](tests/) (xUnit v3 on Microsoft.Testing.Platform, op
 ### Menu player page
 
 The player page is TypeScript in [web/](web/): a DVD VM that runs a disc's own navigation commands
-(`src/dvdvm.ts`, after libdvdnav), the menu renderer (`src/player.ts`) and playback through Jellyfin's HLS
-stream with hls.js (`src/playback.ts`). The Disc menu button is `src/inject.ts` (with `src/embed.ts`, the messages
-between the overlay and the player). `npm run build` writes the page to `web/dist/`, with hls.js bundled, and the
-button to `web/dist/inject/button.js`.
+(`src/dvdvm.ts`, after libdvdnav), the menu renderer (`src/player.ts`) and what a title hands to the web client's
+player (`src/handoff.ts`). The Disc menu button, the overlay and the Play command are `src/inject.ts` (with
+`src/embed.ts`, the messages between the overlay and the player). `npm run build` writes the page to `web/dist/`
+and the button to `web/dist/inject/button.js`.
 
 ```bash
 cd web
 npm ci --ignore-scripts
 npm run check    # type check
-npm test         # VM scenarios on the Sintel fixture, the button and overlay (happy-dom), the safety check
+npm test         # VM scenarios on the Sintel fixture, the hand-off, the button and overlay (happy-dom), the safety check
 npm run serve    # http://127.0.0.1:8098/dist/index.html?pack=../fixtures/sintel/ (no login, stub playback)
 ```
 
