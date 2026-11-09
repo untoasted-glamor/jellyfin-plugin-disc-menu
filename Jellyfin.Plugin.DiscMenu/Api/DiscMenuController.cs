@@ -29,6 +29,19 @@ public class DiscMenuController : ControllerBase
     private const string UserIdClaim = "Jellyfin-UserId";
     private const string IsApiKeyClaim = "Jellyfin-IsApiKey";
 
+    /// <summary>
+    /// The player page's policy: its own scripts and styles only, media and images from this server (hls.js plays
+    /// through blob: URLs), and framed only by this server's own pages (the Disc menu button's overlay).
+    /// </summary>
+    internal const string PlayerPolicy =
+        "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; " +
+        "connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'";
+
+    /// <summary>
+    /// The Disc menu button's script among the page's files.
+    /// </summary>
+    internal const string ButtonScript = "inject/button.js";
+
     private static readonly FileExtensionContentTypeProvider _contentTypes = new();
 
     private readonly ILibraryManager _libraryManager;
@@ -79,16 +92,33 @@ public class DiscMenuController : ControllerBase
             file = PlayerAssets.Index;
         }
 
-        var asset = PlayerAssets.Find(file);
+        // One file name: the button's script (inject/button.js) has its own route.
+        var asset = file.Contains('/', StringComparison.Ordinal) ? null : PlayerAssets.Find(file);
         if (asset is null)
         {
             return NotFound();
         }
 
-        // Always revalidate: names don't change between releases, the ETag does.
-        Response.Headers.CacheControl = "no-cache";
-        Response.Headers.XContentTypeOptions = "nosniff";
-        return File(asset.Content, asset.ContentType, lastModified: null, entityTag: asset.ETag);
+        Response.Headers.ContentSecurityPolicy = PlayerPolicy;
+        return Asset(asset);
+    }
+
+    /// <summary>
+    /// Serves the Disc menu button's script, which runs inside Jellyfin's web client. The plugin registers a loader
+    /// for it with the JavaScript Injector plugin; a script tag can't carry a token, so it needs no login, like the
+    /// player page.
+    /// </summary>
+    /// <response code="200">The script.</response>
+    /// <response code="404">A build without the web part.</response>
+    /// <returns>The button's script.</returns>
+    [HttpGet("Inject/button.js")]
+    [AllowAnonymous]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public ActionResult GetButtonScript()
+    {
+        var asset = PlayerAssets.Find(ButtonScript);
+        return asset is null ? NotFound() : Asset(asset);
     }
 
     /// <summary>
@@ -186,6 +216,14 @@ public class DiscMenuController : ControllerBase
 
         Response.Headers.CacheControl = "private, no-cache";
         return Ok(_media.Map(lookup.Item, titles, lookup.User));
+    }
+
+    private FileContentResult Asset(PlayerAsset asset)
+    {
+        // Always revalidate: names don't change between releases, the ETag does.
+        Response.Headers.CacheControl = "no-cache";
+        Response.Headers.XContentTypeOptions = "nosniff";
+        return File(asset.Content, asset.ContentType, lastModified: null, entityTag: asset.ETag);
     }
 
     // A series or movie the caller may see, and the caller's user (null for an API key). An API key sees every item,

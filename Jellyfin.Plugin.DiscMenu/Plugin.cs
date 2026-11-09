@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using Jellyfin.Plugin.DiscMenu.Configuration;
+using Jellyfin.Plugin.DiscMenu.Web;
 using MediaBrowser.Common.Configuration;
 using MediaBrowser.Common.Plugins;
 using MediaBrowser.Model.Plugins;
@@ -38,6 +39,23 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
     /// Gets the current plugin instance.
     /// </summary>
     public static Plugin? Instance { get; private set; }
+
+    /// <summary>
+    /// Removes the Disc menu button from JavaScript Injector's settings, so it doesn't outlive the plugin.
+    /// </summary>
+    public override void OnUninstalling()
+    {
+        try
+        {
+            JavaScriptInjector.Unregister(JavaScriptInjector.FindInterface());
+        }
+        catch (Exception ex) when (JavaScriptInjector.IsInjectorFailure(ex))
+        {
+            // Injector is optional; its leftover entry only loads a script that is gone (a 404, and no button).
+        }
+
+        base.OnUninstalling();
+    }
 
     /// <inheritdoc />
     public IEnumerable<PluginPageInfo> GetPages()

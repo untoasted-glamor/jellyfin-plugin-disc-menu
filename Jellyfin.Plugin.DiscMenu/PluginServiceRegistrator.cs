@@ -1,5 +1,6 @@
 using Jellyfin.Plugin.DiscMenu.Media;
 using Jellyfin.Plugin.DiscMenu.Packs;
+using Jellyfin.Plugin.DiscMenu.Web;
 using MediaBrowser.Controller;
 using MediaBrowser.Controller.Plugins;
 using Microsoft.Extensions.DependencyInjection;
@@ -16,5 +17,6 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
     {
         serviceCollection.AddSingleton<PackStore>();
         serviceCollection.AddSingleton<MediaLookup>();
+        serviceCollection.AddHostedService<InjectorRegistration>();
     }
 }

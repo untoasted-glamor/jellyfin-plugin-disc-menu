@@ -83,7 +83,38 @@ public sealed class DiscMenuControllerTests : IDisposable
         Assert.NotEmpty(file.FileContents);
     }
 
+    [Fact]
+    public void GetPlayer_sends_a_strict_policy_that_allows_framing_by_this_server_only()
+    {
+        var controller = Controller(new ClaimsPrincipal(), "/DiscMenu/Player/");
+
+        controller.GetPlayer(null);
+
+        var policy = controller.Response.Headers.ContentSecurityPolicy.ToString();
+        Assert.Contains("script-src 'self';", policy, StringComparison.Ordinal);
+        Assert.Contains("frame-ancestors 'self'", policy, StringComparison.Ordinal);
+        Assert.Contains("form-action 'none'", policy, StringComparison.Ordinal);
+        Assert.DoesNotContain("unsafe", policy, StringComparison.Ordinal);
+        Assert.Equal("nosniff", controller.Response.Headers.XContentTypeOptions.ToString());
+    }
+
+    [Fact]
+    public void GetButtonScript_serves_the_button_with_no_login()
+    {
+        var controller = Controller(new ClaimsPrincipal(), "/DiscMenu/Inject/button.js");
+
+        var file = Assert.IsType<FileContentResult>(controller.GetButtonScript());
+
+        Assert.Equal("text/javascript; charset=utf-8", file.ContentType);
+        Assert.Contains("discmenu:close", Encoding.UTF8.GetString(file.FileContents), StringComparison.Ordinal);
+        Assert.Equal("no-cache", controller.Response.Headers.CacheControl.ToString());
+        Assert.Equal("nosniff", controller.Response.Headers.XContentTypeOptions.ToString());
+        Assert.NotNull(Method(nameof(DiscMenuController.GetButtonScript)).GetCustomAttribute<AllowAnonymousAttribute>());
+    }
+
     [Theory]
+    [InlineData("inject/button.js")]
+    [InlineData("inject%2Fbutton.js")]
     [InlineData("missing.js")]
     [InlineData("..")]
     [InlineData("../Plugin.cs")]
@@ -94,9 +125,10 @@ public sealed class DiscMenuControllerTests : IDisposable
     }
 
     [Fact]
-    public void Only_the_player_page_is_served_without_a_login()
+    public void Only_the_player_page_and_the_button_are_served_without_a_login()
     {
         Assert.NotNull(Method(nameof(DiscMenuController.GetPlayer)).GetCustomAttribute<AllowAnonymousAttribute>());
+        Assert.NotNull(Method(nameof(DiscMenuController.GetButtonScript)).GetCustomAttribute<AllowAnonymousAttribute>());
         Assert.NotNull(Method(nameof(DiscMenuController.GetDiscs)).GetCustomAttribute<AuthorizeAttribute>());
         Assert.NotNull(Method(nameof(DiscMenuController.GetFile)).GetCustomAttribute<AuthorizeAttribute>());
         Assert.NotNull(Method(nameof(DiscMenuController.GetMedia)).GetCustomAttribute<AuthorizeAttribute>());
