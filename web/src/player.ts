@@ -1,20 +1,27 @@
 // The menu player page: runs a DVD menu pack in the browser. Menus are drawn from the pack (background,
-// the disc's own subpicture overlay, per-button highlight images); title cells are handed to a
-// Playback (Jellyfin or the stub). Keys: arrows move, Enter/Space activate, M or Escape = Menu,
-// T = Title menu. Mouse hover selects, click or tap activates.
+// the disc's own subpicture overlay, per-button highlight images). Keys: arrows move, Enter/Space activate, M = Menu,
+// T = Title menu (and Escape = Menu outside the overlay). Mouse hover selects, click or tap activates.
 //
 // The page opens a series' or movie's pack from the plugin with ?item=<id> (and &disc=<pack>, else the item's only
-// pack or a choice). It signs in with the web client's saved login where the browser has one, else its own sign-in
-// (Quick Connect, or a user name and password); see jellyfin.ts. ?pack=<folder>/ opens a pack folder on the same
-// server with no login and stub playback, for testing the menus. With &embed=1 inside a frame, the page runs in the
-// Disc menu button's overlay in the web client (see embed.ts): Back asks the overlay to close, and Close stops the title
-// before the overlay goes.
+// pack or a choice). ?pack=<folder>/ opens a pack folder on the same server with no login, for testing the menus.
+//
+// With &embed=1 inside a frame, the page runs in the Disc menu button's overlay in the web client (see embed.ts): it
+// shows only the menu, full screen, with a control bar that comes and goes, and uses the web client's login only.
+// When the disc starts a title the library has, after the viewer pressed a menu button, the page hands it to the web
+// client's own player (handoff.ts) and the overlay closes: one way, there is no return to the menu. A title the disc
+// starts before any button press (logos, warnings) is skipped, so the disc gets to its menu.
+//
+// Opened by hand (not embedded), the page plays nothing from the library: a title cell shows what would play, with the
+// stub's clock, and what the overlay would hand off. It signs in with the web client's saved login where the browser has
+// one, else its own sign-in (Quick Connect, or a user name and password); see jellyfin.ts.
+import { AutoplayGate } from "./autoplay.js";
 import { discButton } from "./dom.js";
-import { embedInPlayer, isBackKey, isEmbedded } from "./embed.js";
+import { embedInPlayer, isBackKey, isEmbedded, isInfoKey, PlayHandoff } from "./embed.js";
 import { ButtonJson, CellJson, DvdVm, MediaCell, MenuJson, Pack } from "./dvdvm.js";
+import { describeHandoff, handoffFor, StreamRegs, titleAction } from "./handoff.js";
 import {
-  browserStore, DiscInfo, encodePath, fmt, forgetPageLogin, HttpError, Jellyfin, JellyfinPlayback, mediaItems, mediaKey,
-  Playback, PlayRequest, requestKey, savedLogins, savePageLogin, serverRoot, StubPlayback, subtitleLabel,
+  browserStore, DiscInfo, encodePath, fmt, forgetPageLogin, HttpError, Jellyfin, loginsFor, MediaItem, mediaItems,
+  mediaKey, PlayRequest, requestKey, savedLogins, savePageLogin, serverRoot, StubPlayback, subtitleLabel,
 } from "./playback.js";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -25,7 +32,7 @@ const itemId = params.get("item");
 let discId = params.get("disc");
 /** Inside the Disc menu button's overlay. */
 const embedded = isEmbedded(window, params);
-let requestClose: () => void = () => {};
+const overlay = embedded ? embedInPlayer(window) : null;
 
 /** A test pack folder, from ?pack=<relative folder>/. Only this server's own addresses are accepted. */
 function testPackBase(): string | null {
@@ -50,7 +57,13 @@ let vm: DvdVm;
 /** A pack is loaded, and the viewer has started the disc (so there is a VM to send keys to). */
 let loaded = false;
 let running = false;
-let playback: Playback = new StubPlayback();
+const playback = new StubPlayback();
+/** The library items the pack's files map to (the plugin's Media route), keyed like the pack's cells. */
+let items = new Map<string, MediaItem>();
+/** Set at the viewer's first menu button press: SPRM 1 and 2 as they were then (see handoff.ts). */
+let baseline: StreamRegs | null = null;
+/** A title went to the web client's player; the page does nothing more. */
+let handedOff = false;
 let timers: number[] = [];
 let drawnCell: CellJson | null = null;
 let titleWatch: { media: string; cellEnd: number | null } | null = null;
@@ -62,6 +75,13 @@ const titleLayer = $<HTMLDivElement>("title");
 const statusEl = $<HTMLDivElement>("status");
 const traceEl = $<HTMLPreElement>("trace");
 const regsEl = $<HTMLPreElement>("regs");
+const bar = $<HTMLDivElement>("bar");
+const unblock = $<HTMLButtonElement>("unblock");
+
+const autoplay = new AutoplayGate(() => {
+  unblock.hidden = false;
+  status("The browser held back the menu's sound. Press Start.");
+});
 
 // ---------------------------------------------------------------------------- trace / status
 
@@ -109,6 +129,7 @@ function next(): void {
 
 function render(): void {
   clearTimers();
+  if (handedOff) return;
   showRegs();
   if (vm.stopped) {
     stopTitle();
@@ -120,17 +141,35 @@ function render(): void {
   if (vm.state.domain === "VTS") {
     showMenuLayer(null);
     const m = vm.media;
-    if (!m) {
+    const item = m ? items.get(mediaKey(m)) : undefined;
+    const action = titleAction({ embedded, mapped: !!m, inLibrary: !!item, pressed: !!baseline });
+    if (action === "missing") {
       stopTitle();
       status(`Title ${vm.sprm[4]} chapter ${vm.sprm[7]}: not in the library (${cell.dur.toFixed(1)} s), skipped`);
       later(500, next);
-      return;
-    }
-    playTitleCell(m);
+    } else if (action === "intro") skipTitle();
+    else if (action === "hand-off") handOff(m!, item!);
+    else playTitleCell(m!, item);
     return;
   }
   stopTitle();
   drawMenu(cell);
+}
+
+/**
+ * A title the disc starts before the viewer pressed any menu button (logos, warnings at first play): skip all of it at
+ * once, as if it had played to its end, so the disc gets to its menu.
+ */
+function skipTitle(): void {
+  const { vtsN, pgcN } = vm.state;
+  const where = `title ${vm.sprm[4]}`;
+  let guard = 0;
+  while (!vm.stopped && vm.state.domain === "VTS" && vm.state.vtsN === vtsN && vm.state.pgcN === pgcN && guard++ < 1000) {
+    vm.cellEnded();
+  }
+  status(`The disc started ${where} before any menu button was pressed: skipped, to get to the menu`);
+  log(`skipped ${where} (no menu button pressed yet)`);
+  later(500, render);
 }
 
 function afterCell(cell: CellJson): void {
@@ -147,12 +186,14 @@ let bgAudio: HTMLAudioElement | null = null;
 
 function showMenuLayer(menu: MenuJson | null): void {
   menuLayer.hidden = !menu;
-  titleLayer.hidden = !!menu || vm.stopped || vm.state.domain !== "VTS";
+  titleLayer.hidden = !!menu || vm.stopped || vm.state.domain !== "VTS" || embedded;
   if (!menu) {
     menuLayer.replaceChildren();
     drawnCell = null;
     if (bgAudio) bgAudio.pause();
     bgAudio = null;
+    autoplay.clear();
+    unblock.hidden = true;
   }
 }
 
@@ -175,16 +216,18 @@ function drawMenu(cell: CellJson): void {
   if (!sameCell) {
     showMenuLayer(null);
     menuLayer.hidden = false;
-    stage.style.aspectRatio = menu.aspect === "4:3" ? "4 / 3" : "16 / 9";
+    const four = menu.aspect === "4:3";
+    stage.style.aspectRatio = four ? "4 / 3" : "16 / 9";
+    stage.style.setProperty("--ar", four ? String(4 / 3) : String(16 / 9));
     const bg = menu.background;
     if (bg?.video) {
       const v = document.createElement("video");
       v.src = packUrl(bg.video);
       v.className = "layer";
       v.playsInline = true;
-      v.autoplay = true;
       v.addEventListener("ended", () => afterCell(cell));
       menuLayer.append(v);
+      autoplay.play(v, true);
     } else if (bg?.image) {
       const i = document.createElement("img");
       i.src = packUrl(bg.image);
@@ -195,7 +238,7 @@ function drawMenu(cell: CellJson): void {
     if (bg?.audio) {
       bgAudio = new Audio(packUrl(bg.audio));
       bgAudio.addEventListener("ended", () => afterCell(cell));
-      bgAudio.play().catch(() => status("Click the page once to allow menu audio."));
+      autoplay.play(bgAudio, false);
     }
     if (menu.overlay) {
       const o = document.createElement("img");
@@ -230,7 +273,7 @@ function drawMenu(cell: CellJson): void {
       });
       d.addEventListener("click", (e) => {
         e.preventDefault();
-        press(b);
+        viewerPress(b);
       });
       menuLayer.append(d);
     }
@@ -243,15 +286,15 @@ function drawMenu(cell: CellJson): void {
     const v = menuLayer.querySelector("video");
     if (v) {
       v.currentTime = 0;
-      v.play().catch(() => {});
+      autoplay.play(v, true);
     }
     if (bgAudio) {
       bgAudio.currentTime = 0;
-      bgAudio.play().catch(() => {});
+      autoplay.play(bgAudio, false);
     }
   }
   paintHighlight();
-  status(`${where}: menu, ${menu.buttons.length} buttons`);
+  if (!autoplay.blocked) status(`${where}: menu, ${menu.buttons.length} buttons`);
   if (!menu.background?.video && !menu.background?.audio) later(Math.max(cell.dur, 0.05) * 1000, () => afterCell(cell));
   if (menu.forced_action) {
     const b = menu.buttons.find((x) => x.n === menu.forced_action);
@@ -280,6 +323,12 @@ function highlight(n: number): void {
   if (b?.auto) press(b);
 }
 
+/** The viewer pressed a menu button (a key, a click or a tap). The disc's own forced or automatic presses don't count. */
+function viewerPress(b: ButtonJson): void {
+  baseline ??= { audio: vm.sprm[1], subp: vm.sprm[2] };
+  press(b);
+}
+
 function press(b: ButtonJson): void {
   vm.select(b.n);
   paintHighlight(true);
@@ -290,18 +339,69 @@ function press(b: ButtonJson): void {
   });
 }
 
+// ---------------------------------------------------------------------------- keys and the overlay's control bar
+
+const BAR_MS = 3000;
+let barTimer = 0;
+
+/** Shows the bar (in the overlay only) for a few seconds, or until the focus leaves it; `focus` puts the focus on it. */
+function showBar(focus = false): void {
+  if (!embedded || handedOff) return;
+  bar.hidden = false;
+  if (focus) bar.querySelector<HTMLButtonElement>("button:not([hidden])")?.focus();
+  window.clearTimeout(barTimer);
+  barTimer = window.setTimeout(() => {
+    if (!bar.contains(document.activeElement)) hideBar();
+    else showBar();
+  }, BAR_MS);
+}
+
+function hideBar(): void {
+  window.clearTimeout(barTimer);
+  const had = bar.contains(document.activeElement);
+  bar.hidden = true;
+  if (had) (document.activeElement as HTMLElement).blur();
+}
+
+/** Keys while the focus is on the bar: Left and Right move along it, Back or Info hide it, Enter presses (natively). */
+function barKey(e: KeyboardEvent): void {
+  const buttons = [...bar.querySelectorAll<HTMLButtonElement>("button:not([hidden])")];
+  const at = buttons.indexOf(document.activeElement as HTMLButtonElement);
+  if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+    const to = buttons[(at + (e.key === "ArrowLeft" ? -1 : 1) + buttons.length) % buttons.length];
+    to?.focus();
+    showBar();
+  } else if (isBackKey(e) || isInfoKey(e)) {
+    hideBar();
+  } else if (e.key === "Enter" || e.key === " ") {
+    showBar();
+    return; // the button's own click
+  } else return;
+  e.preventDefault();
+}
+
 function onKey(e: KeyboardEvent): void {
   // Typing in the sign-in form isn't a remote's key, and before Start there is nothing to send keys to.
   const t = e.target as HTMLElement | null;
   if (t?.closest("input, textarea, select, [contenteditable]")) return;
-  if (embedded && isBackKey(e)) {
-    e.preventDefault();
-    requestClose();
-    return;
+  if (embedded) {
+    if (bar.contains(t)) return barKey(e);
+    if (isInfoKey(e)) {
+      e.preventDefault();
+      if (bar.hidden) showBar(true);
+      else hideBar();
+      return;
+    }
+    if (isBackKey(e)) {
+      e.preventDefault();
+      overlay!.requestClose();
+      return;
+    }
   }
   if (!running) return;
   const k = e.key;
-  if (k === "m" || k === "M" || k === "Escape") {
+  // In the overlay the page is full screen, where the browser keeps Escape for leaving full screen.
+  if (k === "m" || k === "M" || (k === "Escape" && !embedded)) {
     menuKey("root");
   } else if (k === "t" || k === "T") {
     menuKey("title");
@@ -313,7 +413,7 @@ function onKey(e: KeyboardEvent): void {
     if (dir) {
       if (b.nav[dir]) highlight(b.nav[dir]);
     } else if (k === "Enter" || k === " ") {
-      press(b);
+      viewerPress(b);
     } else return;
   } else return;
   e.preventDefault();
@@ -328,20 +428,18 @@ function menuKey(which: "root" | "title"): void {
 
 // ---------------------------------------------------------------------------- titles
 
-/** Stops the playing title; the promise settles once the server was asked to end its transcode. */
-function stopTitle(): Promise<void> {
-  const stopped = playback.key ? playback.stop() : Promise.resolve();
+function stopTitle(): void {
+  if (playback.key) playback.stop();
   titleWatch = null;
-  return stopped;
 }
 
-/** Stops everything that plays: the title, and a menu's background video or audio. For closing the page. */
-function stopAll(): Promise<void> {
+/** Stops everything: the VM's timers, the stub's clock, and a menu's background video or audio. */
+function stopAll(): void {
   clearTimers();
   running = false;
   bgAudio?.pause();
   menuLayer.querySelector("video")?.pause();
-  return stopTitle();
+  stopTitle();
 }
 
 /** "S01E03" for an episode, the file name for a movie. */
@@ -381,25 +479,44 @@ function request(m: MediaCell): PlayRequest {
   };
 }
 
+/** What the overlay hands to the web client's player for this cell. */
+function handoff(m: MediaCell, item: MediaItem): PlayHandoff {
+  return handoffFor(item, request(m), { audio: vm.sprm[1], subp: vm.sprm[2] }, baseline ?? { audio: vm.sprm[1], subp: vm.sprm[2] });
+}
+
+/** In the overlay: the title goes to the web client's own player, and the menu is done. */
+function handOff(m: MediaCell, item: MediaItem): void {
+  const h = handoff(m, item);
+  const line = `Handing ${request(m).label} to Jellyfin's player: ${describeHandoff(h)}`;
+  status(line);
+  log(line);
+  handedOff = true;
+  stopAll();
+  hideBar();
+  overlay!.handOff(h);
+}
+
 function cellEndFor(m: MediaCell): number | null {
   const nextCell = pack.media[`${vm.state.vtsN}:${vm.state.pgcN}`]?.cells[String(vm.state.cellN + 1)];
   return nextCell && mediaKey(nextCell) === mediaKey(m) ? nextCell.offset : null;
 }
 
-function playTitleCell(m: MediaCell): void {
+/** On the page opened by hand: the stub shows what would play, and what the overlay would hand off. */
+function playTitleCell(m: MediaCell, item: MediaItem | undefined): void {
   titleLayer.hidden = false;
   if (!titleLayer.contains(playback.el)) titleLayer.replaceChildren(playback.el);
   const r = request(m);
   status(`Playing ${r.title} from ${fmt(m.offset)} (${r.label}), ` +
-    `audio ${r.audioLang3 ?? "default"}, subtitles ${subtitleLabel(r)}`);
+    `audio ${r.audioLang3 ?? "default"}, subtitles ${subtitleLabel(r)}` +
+    (item ? `. The Disc menu button would hand off ${describeHandoff(handoff(m, item))}` : ""));
   const cont = playback.key === requestKey(r);
   titleWatch = { media: r.media, cellEnd: cellEndFor(m) };
   if (cont && Math.abs(playback.time() - m.offset) < 3) return; // carry on, same stream
   if (cont) playback.seek(m.offset);
-  else void playback.load(r);
+  else playback.load(r);
 }
 
-function wirePlayback(p: Playback): void {
+function wirePlayback(p: StubPlayback): void {
   p.ontime = (t) => {
     if (titleWatch && titleWatch.cellEnd !== null && t >= titleWatch.cellEnd - 0.1) next();
   };
@@ -411,10 +528,6 @@ function wirePlayback(p: Playback): void {
     while (!vm.stopped && vm.state.domain === "VTS" && sameFile() && guard++ < 100) vm.cellEnded();
     playback.key = null;
     render();
-  };
-  p.onerror = (msg) => {
-    status(`Playback error: ${msg}`);
-    log(`playback error: ${msg}`);
   };
 }
 
@@ -430,9 +543,9 @@ let jf: Jellyfin | null = null;
 /** Set when the viewer asked for another account or the web client's token was refused: don't reuse it again. */
 let skipWebLogin = false;
 
-/** Signs in with a saved login (this page's own, then the web client's) that the server still takes. */
+/** Signs in with a saved login (this page's own, then the web client's; the web client's only in the overlay). */
 async function savedSignIn(): Promise<boolean> {
-  for (const login of savedLogins(store, serverId)) {
+  for (const login of loginsFor(embedded, savedLogins(store, serverId))) {
     if (login.source === "web" && skipWebLogin) continue;
     const conn = server!.as(login, store);
     try {
@@ -458,8 +571,18 @@ function signedIn(conn: Jellyfin, name: string): void {
   sw.hidden = false;
 }
 
+/** In the overlay with no usable web client login: the page has no sign-in of its own there. */
+function noOverlayLogin(): void {
+  jf = null;
+  const why = "Jellyfin didn't take the web client's login. Sign in to the web client again, then open the Disc menu.";
+  status(why);
+  $("splash-note").textContent = why;
+  jfState("Not connected.");
+}
+
 /** Shows the sign-in: a Quick Connect code where the server has it on, and the user name and password form. */
 async function showSignIn(why: string): Promise<void> {
+  if (embedded) return noOverlayLogin();
   jf = null;
   $("jf-account").textContent = "Not signed in.";
   $("jf-switch").hidden = true;
@@ -574,7 +697,7 @@ async function loginRefused(): Promise<void> {
   await showSignIn("Jellyfin no longer takes this login. Sign in again.");
 }
 
-/** Opens ?item='s pack (the one in &disc=, its only one, or the viewer's choice), then connects playback. */
+/** Opens ?item='s pack (the one in &disc=, its only one, or the viewer's choice), then finds its files in the library. */
 async function openItem(): Promise<void> {
   const conn = jf;
   if (!conn) return;
@@ -583,6 +706,7 @@ async function openItem(): Promise<void> {
       const discs = await conn.discs(itemId!);
       if (discs.length === 0) {
         status("This series or movie has no disc menus.");
+        $("splash-note").textContent = "This series or movie has no disc menus.";
         jfState("Connected; no disc menus here.");
         return;
       }
@@ -593,13 +717,16 @@ async function openItem(): Promise<void> {
       discId = discs[0].Id;
     }
     if (!loaded) await loadPack(`${conn.base}${conn.discsPath(itemId!)}/${encodeURIComponent(discId)}/Files/`, conn);
-    await connectPlayback(conn);
+    await findMedia(conn);
+    // In the overlay the menu starts at once: the viewer already chose it with the Disc menu button.
+    if (embedded && !running) startDisc();
   } catch (e) {
     const msg = (e as Error).message;
     if (e instanceof HttpError && e.status === 401) return loginRefused();
     if (e instanceof HttpError && (e.status === 404 || e.status === 403))
       status("This disc's menus aren't on this server, or this account can't see them.");
     else status(`Couldn't open the disc: ${msg}`);
+    $("splash-note").textContent = statusEl.textContent;
     jfState(`Not connected: ${msg}`);
   }
 }
@@ -609,18 +736,18 @@ function closePack(): void {
   stopTitle();
   clearTimers();
   running = false;
+  items = new Map();
   if (!loaded) return;
   loaded = false;
   menuLayer.hidden = true;
   titleLayer.hidden = true;
   $<HTMLButtonElement>("start").parentElement!.hidden = false;
   $<HTMLButtonElement>("start").disabled = true;
-  playback = new StubPlayback();
-  wirePlayback(playback);
 }
 
 function chooseDisc(discs: DiscInfo[]): void {
   status("This has more than one disc. Pick one.");
+  $("splash-note").textContent = "This has more than one disc. Pick one.";
   const list = $<HTMLDivElement>("discs");
   list.replaceChildren(
     ...discs.map((d) =>
@@ -634,23 +761,18 @@ function chooseDisc(discs: DiscInfo[]): void {
       }),
     ),
   );
+  if (embedded) list.querySelector("button")?.focus();
 }
 
-/** Asks the plugin which library item plays each of the pack's files, then plays titles through Jellyfin. */
-async function connectPlayback(jf: Jellyfin): Promise<void> {
+/** Asks the plugin which library item plays each of the pack's files. */
+async function findMedia(jf: Jellyfin): Promise<void> {
   jfState("Connecting...");
   const media = await jf.media(itemId!, discId!);
   const missing = media.Titles.filter((t) => !t.ItemId).map((t) => mediaTitle({ offset: 0, file: t.File, episode: t.Episode }));
-  usePlayback(new JellyfinPlayback(jf, mediaItems(media)));
+  items = mediaItems(media);
   const n = media.Titles.length;
   jfState(`Connected: ${media.Name}, ${n - missing.length} of ${n} files found` +
     (missing.length ? ` (missing ${missing.join(", ")})` : ""));
-}
-
-function usePlayback(p: Playback): void {
-  stopTitle();
-  playback = p;
-  wirePlayback(p);
   if (running && !vm.stopped && vm.state.domain === "VTS") render();
 }
 
@@ -660,10 +782,16 @@ function restart(): void {
   if (!loaded) return;
   stopTitle();
   trace.length = 0;
+  baseline = null;
   vm = new DvdVm(pack, { log });
   running = true;
   vm.start();
   render();
+}
+
+function startDisc(): void {
+  $<HTMLButtonElement>("start").parentElement!.hidden = true;
+  restart();
 }
 
 /** Loads menu.json from a pack folder (signed with conn's token when given) and warms the menu images. */
@@ -690,8 +818,6 @@ async function loadPack(packBase: string, conn: Jellyfin | null): Promise<void> 
   $("disc-name").textContent = pack.disc.name;
   loaded = true;
   $<HTMLButtonElement>("start").disabled = false;
-  // In the overlay, a remote's Enter starts the disc.
-  if (embedded) $<HTMLButtonElement>("start").focus();
   status("Ready. Press Start disc.");
 }
 
@@ -711,19 +837,30 @@ async function main(): Promise<void> {
   $("btn-title").addEventListener("click", () => menuKey("title"));
   $("btn-restart").addEventListener("click", restart);
   document.addEventListener("keydown", onKey);
-  // Leaving the page (or the overlay removing it) ends the title's transcode; the request outlives the page. The menus
-  // keep running, for a page the browser restores from its back-forward cache.
-  window.addEventListener("pagehide", () => void stopTitle());
+  unblock.addEventListener("click", () => {
+    unblock.hidden = true;
+    autoplay.resume();
+    if (running && drawnCell?.menu) status(`${vm.where()}: menu, ${drawnCell.menu.buttons.length} buttons`);
+  });
+  // The menus keep running for a page the browser restores from its back-forward cache; the stub's clock stops.
+  window.addEventListener("pagehide", stopTitle);
   if (embedded) {
     document.documentElement.classList.add("embedded");
     // Over the web client, whose default theme is dark.
     document.documentElement.dataset.theme = "dark";
-    requestClose = embedInPlayer(window, stopAll);
+    $("bar-close").addEventListener("click", () => overlay!.requestClose());
+    $("bar-menu").addEventListener("click", () => menuKey("root"));
+    $("bar-title").addEventListener("click", () => menuKey("title"));
+    bar.addEventListener("focusin", () => showBar());
+    // A pointer that moves shows the bar; a resting one doesn't. A tap that misses every menu button shows it too.
+    document.addEventListener("pointermove", (e) => {
+      if (e.pointerType === "mouse") showBar();
+    });
+    stage.addEventListener("click", (e) => {
+      if (!(e.target as Element).closest(".btn, button")) showBar();
+    });
   }
-  go.addEventListener("click", () => {
-    go.parentElement!.hidden = true;
-    restart();
-  });
+  go.addEventListener("click", startDisc);
 
   if (itemId) {
     server = new Jellyfin(serverRoot(), null, store);
@@ -735,6 +872,7 @@ async function main(): Promise<void> {
       else await showSignIn("Sign in to Jellyfin to open this disc's menus.");
     } catch (e) {
       status(`Couldn't reach Jellyfin: ${(e as Error).message}`);
+      $("splash-note").textContent = statusEl.textContent;
       jfState("Not connected.");
     }
     return;

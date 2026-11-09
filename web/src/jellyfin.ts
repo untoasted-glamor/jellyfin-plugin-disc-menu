@@ -5,7 +5,7 @@
 // Otherwise the page signs in itself, with Quick Connect or a user name and password, and keeps that login under
 // its own key. A reused token is sent on its own, with no client or device name: the server renames a token's
 // device to whatever a request names, so naming the page would rename the web client's device.
-import { DiscInfo, DiscMedia, MediaItem } from "./media.js";
+import { DiscInfo, DiscMedia } from "./media.js";
 
 declare const __PLAYER_VERSION__: string;
 
@@ -89,7 +89,15 @@ export function savedLogins(store: KeyValueStore, serverId: string): Login[] {
   return [pageLogin(store, serverId), webClientLogin(store, serverId)].filter((l): l is Login => l !== null);
 }
 
-/** This browser's device id for the page's own logins and its streams; made once and kept. */
+/**
+ * The logins to try on this page. Inside the Disc menu button's overlay, only the web client's: the overlay plays
+ * titles as the web client's user, so the page must see the library as that user too.
+ */
+export function loginsFor(embedded: boolean, logins: Login[]): Login[] {
+  return embedded ? logins.filter((l) => l.source === "web") : logins;
+}
+
+/** This browser's device id for the page's own logins; made once and kept. */
 export function deviceId(store: KeyValueStore): string {
   let id = store.getItem("discmenu.deviceId") ?? "";
   if (!id) {
@@ -246,39 +254,5 @@ export class Jellyfin {
   /** Which library item plays each file the pack names, with its streams (looked up on every call). */
   media(item: string, disc: string): Promise<DiscMedia> {
     return this.get<DiscMedia>(`${this.discsPath(item)}/${encodeURIComponent(disc)}/Media`);
-  }
-
-  // ---- streaming ----
-
-  streamUrl(item: MediaItem, audio: number | null, sub: number | null, playSessionId: string): string {
-    const q = new URLSearchParams({
-      MediaSourceId: item.mediaSourceId,
-      DeviceId: this.deviceId,
-      PlaySessionId: playSessionId,
-      VideoCodec: "h264",
-      AudioCodec: "aac",
-      TranscodingMaxAudioChannels: "2",
-      VideoBitrate: "8000000",
-      AudioBitrate: "192000",
-      SegmentContainer: "ts",
-      MinSegments: "1",
-      BreakOnNonKeyFrames: "True",
-    });
-    if (this.login) q.set("ApiKey", this.login.token);
-    if (audio !== null) q.set("AudioStreamIndex", String(audio));
-    if (sub !== null) {
-      q.set("SubtitleStreamIndex", String(sub));
-      q.set("SubtitleMethod", "Encode");
-    }
-    return `${this.base}Videos/${item.id}/master.m3u8?${q}`;
-  }
-
-  /** Ends a title's transcode. keepalive: the request still goes out when the page is closing. Never rejects. */
-  stopEncoding(playSessionId: string): Promise<void> {
-    const q = new URLSearchParams({ deviceId: this.deviceId, playSessionId });
-    return this.call(`Videos/ActiveEncodings?${q}`, { method: "DELETE", keepalive: true }).then(
-      () => {},
-      () => {},
-    );
   }
 }

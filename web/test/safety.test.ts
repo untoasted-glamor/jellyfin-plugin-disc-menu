@@ -35,6 +35,11 @@ describe("no markup or code from strings", () => {
     });
   }
 
+  it("plays no title on the page: no hls.js, no stream or transcode calls", () => {
+    const hits = sources("src").filter(({ text }) => /from\s+"hls\.js|master\.m3u8|ActiveEncodings/.test(text)).map((f) => f.file);
+    expect(hits).toEqual([]);
+  });
+
   it("shows a disc name made of markup as text", () => {
     const name = '<img src=x onerror="window.pwned=1">';
     const b = discButton(document, { Id: "d1", Name: name, Type: "dvd" }, () => {});

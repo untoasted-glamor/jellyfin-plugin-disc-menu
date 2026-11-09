@@ -1,34 +1,16 @@
-// What plays a title cell. JellyfinPlayback streams the title's file from Jellyfin over HLS (Jellyfin
-// transcodes to H.264/AAC and burns in the chosen subtitle); StubPlayback only shows what would play and runs
-// a clock, so the menus can be tested without a server.
-import Hls from "hls.js";
-import { Jellyfin } from "./jellyfin.js";
-import { MediaItem, pickStreams, PlayRequest, requestKey, subtitleLabel } from "./media.js";
+// What plays a title cell on the page opened by hand (DiscMenu/Player/?item= or ?pack=): StubPlayback only shows what
+// would play and runs a clock, so the menus can be followed without playing anything. In the Disc menu button's
+// overlay the page plays no title at all: it hands the title to the web client's own player (see handoff.ts).
+import { PlayRequest, requestKey, subtitleLabel } from "./media.js";
 
 export * from "./media.js";
 export * from "./jellyfin.js";
 
-export interface Playback {
-  readonly el: HTMLElement;
-  key: string | null;
-  load(r: PlayRequest): Promise<void>;
-  seek(t: number): void;
-  time(): number;
-  /** Stops playing; settles once the server was asked to end the title's transcode (at once for the stub). */
-  stop(): Promise<void>;
-  ontime: (t: number) => void;
-  onended: () => void;
-  onerror: (msg: string) => void;
-}
-
-// ---------------------------------------------------------------------------- stub
-
-export class StubPlayback implements Playback {
+export class StubPlayback {
   readonly el: HTMLElement;
   key: string | null = null;
   ontime: (t: number) => void = () => {};
   onended: () => void = () => {};
-  onerror: (msg: string) => void = () => {};
   private t = 0;
   private timer: number | null = null;
   private readonly info: HTMLElement;
@@ -57,12 +39,12 @@ export class StubPlayback implements Playback {
     btn("End of file", () => this.finish());
     const note = document.createElement("p");
     note.className = "stub-note";
-    note.textContent = "No Jellyfin connection: this shows what would play. The clock runs at normal speed.";
+    note.textContent = "Nothing plays on this page: this shows what would play. The clock runs at normal speed.";
     this.el.append(this.info, this.clock, bar, note);
   }
 
-  async load(r: PlayRequest): Promise<void> {
-    void this.stop();
+  load(r: PlayRequest): void {
+    this.stop();
     this.key = requestKey(r);
     this.label = r.label;
     this.length = r.length;
@@ -86,11 +68,10 @@ export class StubPlayback implements Playback {
     return this.t;
   }
 
-  stop(): Promise<void> {
+  stop(): void {
     if (this.timer !== null) window.clearInterval(this.timer);
     this.timer = null;
     this.key = null;
-    return Promise.resolve();
   }
 
   private jump(s: number): void {
@@ -99,7 +80,7 @@ export class StubPlayback implements Playback {
   }
 
   private finish(): void {
-    void this.stop();
+    this.stop();
     this.onended();
   }
 
@@ -113,82 +94,4 @@ export class StubPlayback implements Playback {
 export function fmt(s: number): string {
   const m = Math.floor(s / 60);
   return `${m}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
-}
-
-// ---------------------------------------------------------------------------- Jellyfin
-
-export class JellyfinPlayback implements Playback {
-  readonly el: HTMLVideoElement;
-  key: string | null = null;
-  ontime: (t: number) => void = () => {};
-  onended: () => void = () => {};
-  onerror: (msg: string) => void = () => {};
-  private hls: Hls | null = null;
-  private session: string | null = null;
-
-  constructor(
-    private readonly jf: Jellyfin,
-    private readonly items: Map<string, MediaItem>,
-  ) {
-    this.el = document.createElement("video");
-    this.el.className = "title-video";
-    this.el.controls = true;
-    this.el.playsInline = true;
-    this.el.addEventListener("timeupdate", () => this.ontime(this.el.currentTime));
-    this.el.addEventListener("ended", () => this.onended());
-  }
-
-  /** The item and Jellyfin stream indexes a request maps to (see pickStreams). */
-  pick(r: PlayRequest): { item: MediaItem; audio: number | null; sub: number | null } {
-    const item = this.items.get(r.media);
-    if (!item) throw new Error(`${r.title} isn't in Jellyfin`);
-    return { item, ...pickStreams(item.streams, r) };
-  }
-
-  async load(r: PlayRequest): Promise<void> {
-    void this.stop();
-    let p;
-    try {
-      p = this.pick(r);
-    } catch (e) {
-      this.onerror(String((e as Error).message));
-      return;
-    }
-    this.key = requestKey(r);
-    this.session = Math.random().toString(36).slice(2);
-    const url = this.jf.streamUrl(p.item, p.audio, p.sub, this.session);
-    if (Hls.isSupported()) {
-      this.hls = new Hls({ startPosition: r.offset });
-      this.hls.on(Hls.Events.ERROR, (_e, d) => {
-        if (d.fatal) this.onerror(`stream error: ${d.type} ${d.details}`);
-      });
-      this.hls.loadSource(url);
-      this.hls.attachMedia(this.el);
-    } else {
-      // Safari plays HLS itself.
-      this.el.src = url;
-      this.el.addEventListener("loadedmetadata", () => (this.el.currentTime = r.offset), { once: true });
-    }
-    this.el.play().catch(() => {});
-  }
-
-  seek(t: number): void {
-    this.el.currentTime = t;
-  }
-
-  time(): number {
-    return this.el.currentTime;
-  }
-
-  stop(): Promise<void> {
-    this.el.pause();
-    if (this.hls) this.hls.destroy();
-    this.hls = null;
-    this.el.removeAttribute("src");
-    this.el.load();
-    const stopped = this.session ? this.jf.stopEncoding(this.session) : Promise.resolve();
-    this.session = null;
-    this.key = null;
-    return stopped;
-  }
 }

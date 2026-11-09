@@ -1,8 +1,8 @@
 // Which login the page uses, what it sends with it, and the sign-in calls, against a plain map and a fake fetch.
 import { expect, test } from "vitest";
 import {
-  authHeader, forgetPageLogin, HttpError, Jellyfin, type KeyValueStore, pageLogin, savedLogins, savePageLogin,
-  webClientLogin,
+  authHeader, forgetPageLogin, HttpError, Jellyfin, type KeyValueStore, loginsFor, pageLogin, savedLogins,
+  savePageLogin, webClientLogin,
 } from "../src/jellyfin.js";
 
 const SERVER = "5f1b9c0e6a6d4e8b9a4c3b2a1f0e9d8c";
@@ -148,14 +148,11 @@ test("signing out ends only the page's own login", async () => {
   expect(sent[0].auth).toContain('Token="mine"');
 });
 
-test("streams and images carry the login's token in ApiKey=, and the page's own device id", () => {
+test("pack images, videos and audio carry the login's token in ApiKey=", () => {
   const store = memoryStore({ "discmenu.deviceId": "dev1" });
   const web = new Jellyfin("http://jf/base/", { token: "web tok", userId: "u", source: "web" }, store);
   expect(web.withKey("http://jf/base/a.png")).toBe("http://jf/base/a.png?ApiKey=web%20tok");
   expect(web.withKey("http://jf/base/a.png?x=1")).toBe("http://jf/base/a.png?x=1&ApiKey=web%20tok");
-  const q = new URL(web.streamUrl({ id: "i1", name: "n", mediaSourceId: "m1", streams: [] }, 2, 5, "ps")).searchParams;
-  expect([q.get("ApiKey"), q.get("DeviceId"), q.get("MediaSourceId"), q.get("AudioStreamIndex")]).toEqual(["web tok", "dev1", "m1", "2"]);
-  expect([q.get("SubtitleStreamIndex"), q.get("SubtitleMethod")]).toEqual(["5", "Encode"]);
 
   const none = new Jellyfin("http://jf/base/", null, store);
   expect(none.withKey("http://jf/base/a.png")).toBe("http://jf/base/a.png");
@@ -166,4 +163,13 @@ test("the device id is made once and kept", () => {
   const a = new Jellyfin("http://jf/", null, store).deviceId;
   expect(a).toMatch(/^disc-menu-/);
   expect(new Jellyfin("http://jf/", null, store).deviceId).toBe(a);
+});
+
+test("inside the overlay, only the web client's login is used", () => {
+  const store = memoryStore(webCredentials([{ Id: SERVER, AccessToken: "web", UserId: "u1" }]));
+  savePageLogin(store, SERVER, "mine", "u2");
+  const all = savedLogins(store, SERVER);
+  expect(loginsFor(false, all).map((l) => l.source)).toEqual(["page", "web"]);
+  expect(loginsFor(true, all)).toEqual([{ token: "web", userId: "u1", source: "web" }]);
+  expect(loginsFor(true, [{ token: "mine", userId: "u2", source: "page" }])).toEqual([]);
 });

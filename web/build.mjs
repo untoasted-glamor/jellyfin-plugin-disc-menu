@@ -1,8 +1,7 @@
-// Builds the player page into dist/: index.html and style.css from static/, player.js bundled with hls.js
-// (its light build: Jellyfin picks the audio and burns in subtitles, so no alternate renditions are needed),
-// and hls.js's licence. Also inject/button.js, the Disc menu button that runs inside the web client (a classic
-// script, since JavaScript Injector's loader adds it as one). The plugin embeds dist/ in its DLL. `node build.mjs --serve [port]` rebuilds on change and serves
-// web/ itself, so the page is at /dist/index.html and a fixture pack at ../fixtures/<disc>/.
+// Builds the player page into dist/: index.html and style.css from static/, and player.js bundled. Also
+// inject/button.js, the Disc menu button that runs inside the web client (a classic script, since JavaScript
+// Injector's loader adds it as one). The plugin embeds dist/ in its DLL. `node build.mjs --serve [port]` rebuilds on
+// change and serves web/ itself, so the page is at /dist/index.html and a fixture pack at ../fixtures/<disc>/.
 import { cp, mkdir, readFile, rm } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import * as esbuild from "esbuild";
@@ -15,7 +14,6 @@ const { version } = JSON.parse(await readFile("package.json", "utf8"));
 await rm("dist", { recursive: true, force: true });
 await mkdir("dist");
 await cp("static", "dist", { recursive: true });
-await cp("node_modules/hls.js/LICENSE", "dist/hls.js.LICENSE.txt");
 
 /** @type {import("esbuild").BuildOptions} */
 const options = {
@@ -26,8 +24,6 @@ const options = {
   target: "es2022",
   minify: !serve,
   sourcemap: serve ? "inline" : false,
-  // The source imports "hls.js" for its types; the bundle gets the light build.
-  alias: { "hls.js": "hls.js/light" },
   define: { __PLAYER_VERSION__: JSON.stringify(version) },
   logLevel: "info",
 };

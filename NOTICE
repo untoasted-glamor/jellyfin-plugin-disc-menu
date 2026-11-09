@@ -3,12 +3,6 @@ Copyright the Disc Menu contributors. Licensed under the GNU General Public Lice
 
 This repository and the plugin it builds include third-party material:
 
-hls.js
-  Bundled into the menu player page (web/dist/player.js, embedded in the plugin).
-  Copyright (c) 2017 Dailymotion. Licensed under the Apache License, Version 2.0.
-  https://github.com/video-dev/hls.js
-  The licence text ships next to the bundle as hls.js.LICENSE.txt.
-
 Sintel test fixture (web/fixtures/sintel/)
   The menu navigation, menu background stills and button highlight images of the Sintel DVD.
   Sintel (c) copyright Blender Foundation | durian.blender.org

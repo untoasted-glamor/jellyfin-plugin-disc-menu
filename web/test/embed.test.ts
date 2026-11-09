@@ -1,27 +1,71 @@
-// The player's side of the overlay: which messages count, the Back keys, and stopping before it answers Close.
-import { describe, expect, it, vi } from "vitest";
-import { CLOSE, CLOSE_REQUEST, CLOSED, embedInPlayer, embedMessage, isBackKey, isEmbedded } from "../src/embed.js";
+// The messages between the overlay and the player: which ones count, the hand-off's checks, and the remote's keys.
+import { describe, expect, it } from "vitest";
+import { CLOSE_REQUEST, embedInPlayer, embedMessage, isBackKey, isEmbedded, isInfoKey, parsePlay, PLAY } from "../src/embed.js";
 
 const ORIGIN = "http://jf.test";
-const parent = { postMessage: vi.fn() };
+const ITEM = "41f6b840b8c91fba90ca5906e7544c90";
+const parent = { postMessage: () => {} };
 
-function msg(type: unknown, source: unknown = parent, origin = ORIGIN): MessageEvent {
-  return { data: { type }, source, origin } as unknown as MessageEvent;
+function msg(data: unknown, source: unknown = parent, origin = ORIGIN): MessageEvent {
+  return { data, source, origin } as unknown as MessageEvent;
 }
 
 const key = (k: string, keyCode = 0, target: unknown = null) => ({ key: k, keyCode, target }) as unknown as KeyboardEvent;
 
 describe("messages", () => {
+  const from = parent as unknown as MessageEventSource;
+
   it("takes our types from the expected window on our origin only", () => {
-    const from = parent as unknown as MessageEventSource;
-    expect(embedMessage(msg(CLOSE), from, ORIGIN)).toBe(CLOSE);
-    expect(embedMessage(msg(CLOSED), from, ORIGIN)).toBe(CLOSED);
-    expect(embedMessage(msg(CLOSE_REQUEST), from, ORIGIN)).toBe(CLOSE_REQUEST);
-    expect(embedMessage(msg(CLOSE, parent, "http://evil.test"), from, ORIGIN)).toBeNull();
-    expect(embedMessage(msg(CLOSE, {}), from, ORIGIN)).toBeNull();
-    expect(embedMessage(msg("other"), from, ORIGIN)).toBeNull();
-    expect(embedMessage({ data: null, source: parent, origin: ORIGIN } as unknown as MessageEvent, from, ORIGIN)).toBeNull();
-    expect(embedMessage(msg(CLOSE), null, ORIGIN)).toBeNull();
+    expect(embedMessage(msg({ type: CLOSE_REQUEST }), from, ORIGIN)).toEqual({ type: CLOSE_REQUEST });
+    const play = { itemId: ITEM, name: "S01E01" };
+    expect(embedMessage(msg({ type: PLAY, play }), from, ORIGIN)).toEqual({ type: PLAY, play });
+    expect(embedMessage(msg({ type: CLOSE_REQUEST }, parent, "http://evil.test"), from, ORIGIN)).toBeNull();
+    expect(embedMessage(msg({ type: CLOSE_REQUEST }, {}), from, ORIGIN)).toBeNull();
+    expect(embedMessage(msg({ type: "discmenu:close" }), from, ORIGIN)).toBeNull();
+    expect(embedMessage(msg(null), from, ORIGIN)).toBeNull();
+    expect(embedMessage(msg({ type: CLOSE_REQUEST }), null, ORIGIN)).toBeNull();
+  });
+
+  it("drops a hand-off whose data doesn't pass the checks", () => {
+    expect(embedMessage(msg({ type: PLAY, play: { itemId: "x", name: "n" } }), from, ORIGIN)).toBeNull();
+    expect(embedMessage(msg({ type: PLAY }), from, ORIGIN)).toBeNull();
+  });
+});
+
+describe("the hand-off's checks", () => {
+  const ok = { itemId: ITEM, name: "Sintel" };
+
+  it("takes the smallest and the largest valid hand-off", () => {
+    expect(parsePlay(ok)).toEqual(ok);
+    const full = {
+      itemId: "2f3a6b0e-1c2d-4e5f-8a9b-0c1d2e3f4a5b",
+      mediaSourceId: ITEM.toUpperCase(),
+      startTicks: Number.MAX_SAFE_INTEGER,
+      audioIndex: 0,
+      subtitleIndex: -1,
+      name: "n".repeat(200),
+    };
+    expect(parsePlay(full)).toEqual(full);
+    expect(parsePlay({ ...ok, startTicks: 0 })).toEqual({ ...ok, startTicks: 0 });
+  });
+
+  it.each([
+    ["no item", { name: "n" }],
+    ["an item that isn't an id", { ...ok, itemId: "<img src=x onerror=alert(1)>" }],
+    ["a media source that isn't an id", { ...ok, mediaSourceId: "../x" }],
+    ["a float position", { ...ok, startTicks: 1.5 }],
+    ["NaN", { ...ok, startTicks: NaN }],
+    ["a negative position", { ...ok, startTicks: -1 }],
+    ["a position past safe integers", { ...ok, startTicks: 2 ** 53 }],
+    ["an index of -2", { ...ok, audioIndex: -2 }],
+    ["a string index", { ...ok, subtitleIndex: "3" }],
+    ["an extra key", { ...ok, url: "https://example.test/" }],
+    ["no name", { itemId: ITEM }],
+    ["a long name", { ...ok, name: "n".repeat(201) }],
+    ["an array", [ok]],
+    ["a string", "play"],
+  ])("refuses %s", (_what, data) => {
+    expect(parsePlay(data)).toBeNull();
   });
 });
 
@@ -40,24 +84,23 @@ describe("keys", () => {
     const field = { closest: (q: string) => (q.includes("input") ? {} : null) };
     expect(isBackKey(key("Backspace", 8, field))).toBe(false);
   });
+
+  it("knows the remote's Info key", () => {
+    expect(isInfoKey(key("Info"))).toBe(true);
+    expect(isInfoKey(key("Unidentified", 457))).toBe(true);
+    expect(isInfoKey(key("i", 73))).toBe(false);
+    expect(isInfoKey(key("ArrowUp", 38))).toBe(false);
+  });
 });
 
-/** A framed window: its parent, our origin, and the message handlers it registers. */
-function framed() {
-  const handlers: ((e: MessageEvent) => void)[] = [];
-  const posted: unknown[] = [];
-  const top = { postMessage: (m: unknown, o: string) => posted.push([m, o]) };
-  const win = {
-    parent: top,
-    location: { origin: ORIGIN },
-    addEventListener: (t: string, h: (e: MessageEvent) => void) => t === "message" && handlers.push(h),
-    setTimeout: (fn: () => void, ms: number) => setTimeout(fn, ms),
-  } as unknown as Window;
-  const send = (type: string, source: unknown = top) => handlers.forEach((h) => h(msg(type, source)));
-  return { win, top, posted, send };
-}
-
 describe("the player in the overlay", () => {
+  function framed() {
+    const posted: unknown[] = [];
+    const top = { postMessage: (m: unknown, o: string) => posted.push([m, o]) };
+    const win = { parent: top, location: { origin: ORIGIN } } as unknown as Window;
+    return { win, posted };
+  }
+
   it("is embedded only with embed=1 inside a frame", () => {
     const { win } = framed();
     expect(isEmbedded(win, new URLSearchParams("embed=1"))).toBe(true);
@@ -67,41 +110,14 @@ describe("the player in the overlay", () => {
     expect(isEmbedded(top as unknown as Window, new URLSearchParams("embed=1"))).toBe(false);
   });
 
-  it("stops, then answers Close", async () => {
-    const { win, posted, send } = framed();
-    let release!: () => void;
-    const stop = vi.fn(() => new Promise<void>((r) => (release = r)));
-    embedInPlayer(win, stop);
-    send(CLOSE);
-    expect(stop).toHaveBeenCalledOnce();
-    await Promise.resolve();
-    expect(posted).toEqual([]);
-    release();
-    await vi.waitFor(() => expect(posted).toEqual([[{ type: CLOSED }, ORIGIN]]));
-  });
-
-  it("answers even when stopping hangs or fails", async () => {
-    vi.useFakeTimers();
-    const { win, posted, send } = framed();
-    embedInPlayer(win, () => new Promise<void>(() => {}), 1500);
-    send(CLOSE);
-    await vi.advanceTimersByTimeAsync(1600);
-    expect(posted).toEqual([[{ type: CLOSED }, ORIGIN]]);
-    vi.useRealTimers();
-
-    const other = framed();
-    embedInPlayer(other.win, () => Promise.reject(new Error("offline")));
-    other.send(CLOSE);
-    await vi.waitFor(() => expect(other.posted).toEqual([[{ type: CLOSED }, ORIGIN]]));
-  });
-
-  it("ignores Close from anyone but its parent, and asks the parent to close on Back", () => {
-    const { win, posted, send } = framed();
-    const stop = vi.fn(() => Promise.resolve());
-    const requestClose = embedInPlayer(win, stop);
-    send(CLOSE, {});
-    expect(stop).not.toHaveBeenCalled();
-    requestClose();
-    expect(posted).toEqual([[{ type: CLOSE_REQUEST }, ORIGIN]]);
+  it("asks its parent, on our origin, to close or to hand a title over", () => {
+    const { win, posted } = framed();
+    const o = embedInPlayer(win);
+    o.requestClose();
+    o.handOff({ itemId: ITEM, name: "S01E01", startTicks: 10 });
+    expect(posted).toEqual([
+      [{ type: CLOSE_REQUEST }, ORIGIN],
+      [{ type: PLAY, play: { itemId: ITEM, name: "S01E01", startTicks: 10 } }, ORIGIN],
+    ]);
   });
 });
