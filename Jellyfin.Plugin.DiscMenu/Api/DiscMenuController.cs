@@ -30,11 +30,12 @@ public class DiscMenuController : ControllerBase
     private const string IsApiKeyClaim = "Jellyfin-IsApiKey";
 
     /// <summary>
-    /// The player page's policy: its own scripts and styles only, media and images from this server (hls.js plays
-    /// through blob: URLs), and framed only by this server's own pages (the Disc menu button's overlay).
+    /// The player page's policy: its own scripts and styles only, media and images from this server (the menus' own
+    /// stills, videos and audio; titles play in the web client's player, not here), and framed only by this server's
+    /// own pages (the Disc menu button's overlay).
     /// </summary>
     internal const string PlayerPolicy =
-        "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; " +
+        "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self'; " +
         "connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'";
 
     /// <summary>
