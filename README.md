@@ -22,13 +22,33 @@ Requires Jellyfin 12.0 or later.
 Updates appear in the same Catalog, and each one needs a restart too. To remove the plugin, open
 **Dashboard > Plugins > Disc Menu > Uninstall** and restart.
 
+## Menu packs
+
+Each disc's menus live in a menu pack: a folder `.discmenus/<disc>/` in the series or movie folder, holding
+`menu.json` (the disc's own navigation commands and buttons) and the menu images and videos it names. Jellyfin
+skips dot-folders when it scans, so a pack never shows up as a library item.
+
+The plugin serves:
+
+| Route | Login | Does |
+|---|---|---|
+| `GET /DiscMenu/Player/` and its files | None | The player page, embedded in the DLL. |
+| `GET /DiscMenu/Items/{itemId}/Discs` | Yes, and the user must see the item | The item's packs: `Id` (folder name), `Name`, `Type` (`dvd`), and `Season` for a series. |
+| `GET /DiscMenu/Items/{itemId}/Discs/{disc}/Files/{path}` | Yes, and the user must see the item | One file of a pack, with range requests. A path that leads out of the pack, once links are followed, is refused. |
+
+A login is a token in `Authorization: MediaBrowser Token="..."`, or `ApiKey=` in the URL for images and video.
+
 ## Build
 
-Needs the .NET 10 SDK and Node.js 22.
+Needs the .NET 10 SDK and Node.js 22. The plugin embeds the player page, so build `web/` first.
 
 ```bash
+(cd web && npm ci --ignore-scripts && npm run build)
+dotnet test --solution Jellyfin.Plugin.DiscMenu.slnx
 dotnet publish Jellyfin.Plugin.DiscMenu/Jellyfin.Plugin.DiscMenu.csproj -c Release -o publish
 ```
+
+The C# tests are in [tests/](tests/) (xUnit v3 on Microsoft.Testing.Platform, opted into in `global.json`).
 
 ### Menu player page
 

@@ -29,4 +29,17 @@
     <EmbeddedResource Include="Configuration\configPage.html" />
   </ItemGroup>
 
+  <!-- The player page, built by `npm run build` in web/. The controller serves it under fixed names: web/<file>. -->
+  <ItemGroup>
+    <EmbeddedResource Include="..\web\dist\**\*" LogicalName="web/%(RecursiveDir)%(Filename)%(Extension)" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Jellyfin.Plugin.DiscMenu.Tests" />
+  </ItemGroup>
+
+  <Target Name="RequireWebDist" BeforeTargets="BeforeBuild">
+    <Error Condition="!Exists('$(MSBuildThisFileDirectory)..\web\dist\index.html')" Text="web/dist/ is missing: the plugin embeds the player page. Build it first: cd web &amp;&amp; npm ci --ignore-scripts &amp;&amp; npm run build" />
+  </Target>
+
 </Project>

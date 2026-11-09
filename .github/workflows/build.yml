@@ -28,6 +28,8 @@ jobs:
           npm run check
           npm test
           npm run build
+      - name: Test
+        run: dotnet test --solution Jellyfin.Plugin.DiscMenu.slnx -c Release
       - name: Build
         run: dotnet publish Jellyfin.Plugin.DiscMenu/Jellyfin.Plugin.DiscMenu.csproj -c Release -o publish
       - name: Package (check only)
