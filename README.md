@@ -2,8 +2,11 @@
 
 A Jellyfin plugin that plays a DVD's or Blu-ray's own title screen and menus, next to the episodes they start.
 
-**Status:** v0.1 is an empty plugin. It installs from the Catalog and shows a settings page, and nothing else yet.
-It proves the release and install path before the menu player moves in.
+**Status:** v0.2 plays a DVD's menus in a browser. A series or movie with a menu pack gets a "Disc menu" link;
+the player page signs in as the viewer, runs the disc's own menus and plays the titles they start from the
+library, with the audio and subtitles chosen in the menus. Blu-ray menus, a phone as the remote for a TV and a
+button next to Play come in later releases. Nothing in this repo makes packs yet; see [Menu packs](#menu-packs) for
+what one holds.
 
 Requires Jellyfin 12.0 or later.
 
