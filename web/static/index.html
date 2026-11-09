@@ -13,6 +13,7 @@
     <button type="button" id="btn-menu" title="M or Esc">Menu</button>
     <button type="button" id="btn-title" title="T">Title menu</button>
     <button type="button" id="btn-restart">Restart</button>
+    <button type="button" id="btn-stats" title="D" class="stats-toggle">Stats</button>
   </div>
 </header>
 
@@ -39,9 +40,16 @@
     <div id="menu" class="menu" hidden></div>
     <div id="title" class="title" hidden></div>
     <button type="button" id="unblock" class="unblock" hidden>Start</button>
+    <div id="wait" class="wait" role="alertdialog" aria-labelledby="wait-text" hidden>
+      <p id="wait-text" class="wait-text"></p>
+      <div class="wait-buttons">
+        <button type="button" id="wait-back">Back to menu</button>
+        <button type="button" id="wait-play">Play</button>
+      </div>
+    </div>
     <div class="splash">
       <p class="splash-help">Plays the disc's own navigation from first play. Arrows move, Enter selects, M or Esc
-      is the Menu key, T the Title menu. Mouse and touch work too.</p>
+      is the Menu key, T the Title menu, D shows the stats. Mouse and touch work too.</p>
       <p id="splash-note" class="splash-note"></p>
       <div id="discs" class="discs"></div>
       <button type="button" id="start">Start disc</button>
@@ -51,7 +59,7 @@
     <button type="button" id="bar-close">Close</button>
     <button type="button" id="bar-menu" title="M">Menu</button>
     <button type="button" id="bar-title" title="T">Title menu</button>
-    <button type="button" id="bar-stats" hidden>Stats</button>
+    <button type="button" id="bar-stats" title="D" class="stats-toggle" hidden>Stats</button>
   </div>
   <div id="status" class="status" role="status"></div>
 
@@ -62,12 +70,6 @@
       <button type="button" id="jf-switch" hidden>Sign out</button>
     </div>
     <p id="jf-state" class="muted">Not connected: title cells show what would play.</p>
-  </details>
-
-  <details class="panel" id="vm-panel">
-    <summary>VM state and trace</summary>
-    <pre id="regs"></pre>
-    <pre id="trace" class="trace"></pre>
   </details>
 </main>
 <script type="module" src="player.js"></script>

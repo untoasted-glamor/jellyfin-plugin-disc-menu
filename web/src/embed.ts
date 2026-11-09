@@ -4,9 +4,15 @@
 // The player sends CLOSE_REQUEST when the viewer closes the menu (the bar's Close, or a remote's Back key), and PLAY
 // when the disc starts a title the library has: the overlay then closes and has the web client play that title (see
 // inject.ts). The player plays nothing from the library itself, so closing needs no answer from it.
+//
+// With "Wait before playing from menu" on in the player's Stats panel, the player sends CHECK instead of PLAY: the
+// overlay does everything a hand-off does but the Play command (it finds the web client's session and builds the
+// request) and answers with CHECKED, the only message that goes from the overlay to the player.
 
 export const CLOSE_REQUEST = "discmenu:close-request";
 export const PLAY = "discmenu:play";
+export const CHECK = "discmenu:check";
+export const CHECKED = "discmenu:checked";
 
 /** A Jellyfin item id: 32 hex digits, or the same with dashes. */
 export const ITEM_ID = /^[0-9a-f]{32}$|^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -48,18 +54,42 @@ export function parsePlay(data: unknown): PlayHandoff | null {
   return h;
 }
 
-export type EmbedMessage = { type: typeof CLOSE_REQUEST } | { type: typeof PLAY; play: PlayHandoff };
+export type EmbedMessage =
+  | { type: typeof CLOSE_REQUEST }
+  | { type: typeof PLAY; play: PlayHandoff }
+  | { type: typeof CHECK; play: PlayHandoff };
 
 /** The message, when it is one of ours from `from` on our own origin and well formed; null for anything else. */
 export function embedMessage(e: MessageEvent, from: MessageEventSource | null, origin: string): EmbedMessage | null {
   if (!from || e.source !== from || e.origin !== origin) return null;
   const data = e.data as { type?: unknown; play?: unknown } | null;
   if (data?.type === CLOSE_REQUEST) return { type: CLOSE_REQUEST };
-  if (data?.type === PLAY) {
+  if (data?.type === PLAY || data?.type === CHECK) {
     const play = parsePlay(data.play);
-    return play ? { type: PLAY, play } : null;
+    return play ? { type: data.type, play } : null;
   }
   return null;
+}
+
+/** What the overlay found for a held hand-off: the session the Play command would go to (null: none), and the detail. */
+export interface CheckResult {
+  session: string | null;
+  detail: string;
+}
+
+const SESSION_ID = /^[0-9a-z-]{1,64}$/i;
+const DETAIL_MAX = 2000;
+
+/** Player side: the overlay's CHECKED answer, from the parent window on our origin and well formed; else null. */
+export function checkedMessage(e: MessageEvent, parent: MessageEventSource | null, origin: string): CheckResult | null {
+  if (!parent || e.source !== parent || e.origin !== origin) return null;
+  const data = e.data as { type?: unknown; result?: unknown } | null;
+  if (data?.type !== CHECKED || !data.result || typeof data.result !== "object") return null;
+  const r = data.result as Record<string, unknown>;
+  if (Object.keys(r).some((k) => k !== "session" && k !== "detail")) return null;
+  if (!(r.session === null || (typeof r.session === "string" && SESSION_ID.test(r.session)))) return null;
+  if (typeof r.detail !== "string" || r.detail.length > DETAIL_MAX) return null;
+  return { session: r.session, detail: r.detail };
 }
 
 /** Whether a key event's target is a form field, where Backspace edits text. */
@@ -87,11 +117,12 @@ export function isEmbedded(win: Window, params: URLSearchParams): boolean {
   return params.get("embed") === "1" && win.parent !== win;
 }
 
-/** Player side: asks the overlay to close, or to hand a title to the web client's player. */
-export function embedInPlayer(win: Window): { requestClose(): void; handOff(play: PlayHandoff): void } {
+/** Player side: asks the overlay to close, to hand a title to the web client's player, or to check a hand-off. */
+export function embedInPlayer(win: Window): { requestClose(): void; handOff(play: PlayHandoff): void; check(play: PlayHandoff): void } {
   const origin = win.location.origin;
   return {
     requestClose: () => win.parent.postMessage({ type: CLOSE_REQUEST }, origin),
     handOff: (play) => win.parent.postMessage({ type: PLAY, play }, origin),
+    check: (play) => win.parent.postMessage({ type: CHECK, play }, origin),
   };
 }

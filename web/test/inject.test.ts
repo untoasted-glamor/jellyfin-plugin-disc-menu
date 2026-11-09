@@ -2,7 +2,8 @@
 // @vitest-environment-options {"url": "http://jf.test/jellyfin/web/index.html"}
 // The Disc menu button in the web client: where it goes, when it shows, and the overlay it opens.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { CLOSE_REQUEST, PLAY, PlayHandoff } from "../src/embed.js";
+import { LOG_KEY, readLog } from "../src/debuglog.js";
+import { CHECK, CHECKED, CLOSE_REQUEST, PLAY, PlayHandoff } from "../src/embed.js";
 import {
   BUTTON_CLASS, DiscMenuButton, detailsItemId, FullScreen, Handoff, OVERLAY_ID, playerUrl, serverRootFrom,
 } from "../src/inject.js";
@@ -287,6 +288,25 @@ describe("the overlay", () => {
     await vi.waitFor(() => expect(order).toEqual(["back", "popstate", "play"]));
     expect(srv.plays.length).toBe(1);
   });
+
+  it("checks a held hand-off without the Play command and answers the player, the overlay staying up", async () => {
+    const srv = sessionServer();
+    const { overlay, player } = await opened(srv.fetcher);
+    fromPlayer(overlay.frame, { type: CHECK, play: { itemId: EPISODE, name: "S01E01", subtitleIndex: 4 } });
+    await vi.waitFor(() => expect(player.postMessage).toHaveBeenCalled());
+    const [msg, origin] = player.postMessage.mock.calls[0];
+    expect(origin).toBe(window.location.origin);
+    expect(msg.type).toBe(CHECKED);
+    expect(msg.result.session).toBe(SESSION);
+    expect(msg.result.detail).toContain(`POST /jellyfin/Sessions/${SESSION}/Playing?playCommand=PlayNow&itemIds=${EPISODE}&subtitleStreamIndex=4`);
+    expect(srv.plays).toEqual([]);
+    expect(document.getElementById(OVERLAY_ID)).toBe(overlay.el);
+  });
+
+  it("lets the player's frame write to the clipboard (the Stats panel's Copy)", async () => {
+    const { overlay } = await opened();
+    expect(overlay.frame.getAttribute("allow")).toContain("clipboard-write");
+  });
 });
 
 const EPISODE = "aaaabbbbccccddddeeeeffff00001111";
@@ -408,6 +428,53 @@ describe("the hand-off", () => {
     const srv = sessionServer({ playing: null, onPlay: () => setTimeout(() => go("#/video"), 10) });
     expect(await run(srv)).toBe("moved");
     expect(window.location.hash).toBe("#/video");
+  });
+
+  it("logs what it did with a level: the Play command's answer, and a fallback as a warning", async () => {
+    const lines: [string, string][] = [];
+    const logged = (srv: SessionServer) =>
+      new Handoff(window, ROOT, api, srv.fetcher, FAST, (level, s) => lines.push([level, s])).run(h, window.location.hash);
+    await logged(sessionServer());
+    expect(lines.map(([l]) => l)).toEqual(["info", "info"]);
+    expect(lines[0][1]).toMatch(new RegExp(`^Play command for S01E03 to session ${SESSION} \\(Jellyfin Web on device ${DEVICE}\\): HTTP 204 \\(playCommand=PlayNow`));
+    lines.length = 0;
+    go(`#/details?id=${SERIES}`);
+    await logged(sessionServer({ playStatus: 403 }));
+    expect(lines.map(([l]) => l)).toEqual(["error", "warn"]);
+    expect(lines[1][1]).toBe("opening the details page of S01E03 instead");
+  });
+
+  it("says which sessions the server lists when none is this web client's", async () => {
+    const lines: [string, string][] = [];
+    const srv = sessionServer({ sessions: [{ Id: "s-client", DeviceId: DEVICE, Client: "Disc Menu", UserId: USER }] });
+    await new Handoff(window, ROOT, api, srv.fetcher, FAST, (level, s) => lines.push([level, s])).run(h, window.location.hash);
+    expect(lines[0][0]).toBe("warn");
+    expect(lines[0][1]).toContain(`device ${DEVICE}, client Jellyfin Web; the server lists 1 for this device: session s-client (Disc Menu on device ${DEVICE})`);
+  });
+
+  it("adds what it did to the tab's Disc menu log, for the next open's Stats panel", async () => {
+    window.sessionStorage.setItem(LOG_KEY, JSON.stringify({ runs: [{ id: 4, opened: 1, started: 2 }], events: [], trace: [], seen: 0 }));
+    vi.spyOn(console, "info").mockImplementation(() => {});
+    await new Handoff(window, ROOT, api, sessionServer({ playStatus: 500 }).fetcher, FAST).run(h, window.location.hash);
+    const events = readLog(window.sessionStorage).events;
+    expect(events.map((e) => [e.run, e.level])).toEqual([[4, "error"], [4, "warn"]]);
+    expect(events[0].text).toMatch(/^Web client: Play command for S01E03 .*HTTP 500/);
+    window.sessionStorage.removeItem(LOG_KEY);
+  });
+
+  it("a check finds the session and builds the request, or says why the real one would fall back", async () => {
+    const found = await new Handoff(window, ROOT, api, sessionServer().fetcher, FAST, () => {}).check(h);
+    expect(found.session).toBe(SESSION);
+    expect(found.detail).toBe(
+      `Would send POST /jellyfin/Sessions/${SESSION}/Playing?playCommand=PlayNow&itemIds=${EPISODE}&startPositionTicks=3499700000` +
+        `&mediaSourceId=${SERIES}&audioStreamIndex=2&subtitleStreamIndex=-1 to session ${SESSION} (Jellyfin Web on device ${DEVICE}).`,
+    );
+    const none = await new Handoff(window, ROOT, api, sessionServer({ sessions: [] }).fetcher, FAST, () => {}).check(h);
+    expect(none).toEqual({ session: null, detail: expect.stringContaining("the server lists 0 for this device): the real hand-off would open the details page.") });
+    const broken = (async () => new Response("", { status: 500 })) as typeof fetch;
+    expect((await new Handoff(window, ROOT, api, broken, FAST, () => {}).check(h)).detail).toMatch(/^Couldn't read the sessions \(Sessions: 500\)/);
+    const signedOut = { ...api, accessToken: () => null };
+    expect((await new Handoff(window, ROOT, signedOut, sessionServer().fetcher, FAST, () => {}).check(h)).session).toBeNull();
   });
 
   it("falls back when the session list can't be read", async () => {

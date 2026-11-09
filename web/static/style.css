@@ -79,7 +79,6 @@ button:hover { border-color: var(--accent); }
 .account p { margin: 8px 0; }
 button[hidden] { display: none; }
 pre { margin: 8px 0; font: 12px/1.4 ui-monospace, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
-.trace { max-height: 320px; overflow: auto; }
 .discs { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
 .discs:empty { display: none; }
 
@@ -89,10 +88,45 @@ pre { margin: 8px 0; font: 12px/1.4 ui-monospace, monospace; white-space: pre-wr
 .splash-note:empty { display: none; }
 .bar { display: none; }
 
+/* The Stats panel: translucent, at the top left over the menu, scrolling; the menu takes taps around it. */
+.stats { position: absolute; top: 8px; left: 8px; z-index: 5; width: min(460px, calc(100% - 16px)); max-height: calc(100% - 16px);
+  display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border-radius: 8px; background: #000000c8; color: #eee;
+  font: 12px/1.4 system-ui, sans-serif; user-select: text; }
+.stats[hidden] { display: none; }
+.stats button { padding: 3px 8px; font-size: 12px; background: #ffffff14; color: #eee; border-color: #fff4; }
+.stats button[aria-pressed="true"], .stats button[aria-checked="true"] { background: #6ea0ff40; border-color: #6ea0ff; }
+.stats button:focus-visible { outline: 2px solid #6ea0ff; outline-offset: 1px; }
+.stats-head { display: flex; gap: 6px; align-items: center; }
+.stats-title { flex: 1; margin: 0; font-size: 13px; }
+.stats-tools { display: flex; flex-wrap: wrap; gap: 6px; }
+.stats-state { margin: 0; padding: 6px; border-radius: 4px; background: #ffffff10; font-size: 11px; }
+.stats-note { margin: 0; color: #bbb; }
+.stats-note:empty { display: none; }
+.stats-copy { min-height: 120px; font: 11px/1.35 ui-monospace, monospace; background: #111; color: #eee; border: 1px solid #fff4; }
+.stats-copy[hidden] { display: none; }
+.stats-log { flex: 1; min-height: 60px; overflow: auto; margin: 0; padding: 0; list-style: none; font: 11px/1.35 ui-monospace, monospace; }
+.stats-log li { padding: 2px 0; border-top: 1px solid #ffffff10; overflow-wrap: anywhere; }
+.stats-log .when { color: #999; margin-right: 6px; }
+.stats-log .lvl { margin-right: 6px; }
+.stats-log .lvl-warn .lvl { color: #ffcc66; }
+.stats-log .lvl-error .lvl, .stats-log .lvl-error .text { color: #ff8a80; }
+.stats-log .earlier { opacity: 0.6; }
+.stats-toggle.dot::after { content: ""; display: inline-block; width: 7px; height: 7px; margin-left: 6px; border-radius: 50%; background: #ff8a80; vertical-align: middle; }
+
+/* "Wait before playing from menu": the held hand-off, over the stopped menu. */
+.wait { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 6; max-width: calc(100% - 32px);
+  padding: 16px 20px; border-radius: 8px; background: #000000d8; color: #fff; border: 1px solid #fff4; }
+.wait[hidden] { display: none; }
+.menu.held { pointer-events: none; filter: brightness(0.45); }
+.wait-text { margin: 0 0 12px; white-space: pre-line; }
+.wait-buttons { display: flex; gap: 8px; justify-content: flex-end; }
+.wait-buttons button { background: #ffffff14; color: #fff; border-color: #fff6; }
+.wait-buttons button:focus-visible { outline: 3px solid #6ea0ff; outline-offset: 2px; }
+
 /* Inside the Disc menu button's overlay: only the menu, fitted to the screen and letterboxed on black, and a control
    bar that comes and goes. --ar is the menu's aspect, set with each menu. */
 .embedded body { background: #000; overflow: hidden; }
-.embedded header, .embedded #status, .embedded #jf-panel, .embedded #vm-panel, .embedded #signin, .embedded .splash-help,
+.embedded header, .embedded #status, .embedded #jf-panel, .embedded #signin, .embedded .splash-help,
 .embedded #start { display: none; }
 .embedded main { padding: 0; max-width: none; }
 .embedded .stage {

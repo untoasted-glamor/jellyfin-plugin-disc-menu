@@ -14,15 +14,23 @@
 // Opened by hand (not embedded), the page plays nothing from the library: a title cell shows what would play, with the
 // stub's clock, and what the overlay would hand off. It signs in with the web client's saved login where the browser has
 // one, else its own sign-in (Quick Connect, or a user name and password); see jellyfin.ts.
+//
+// Everything the page shows goes into the tab's log too, with a level, and the VM's trace beside it (debuglog.ts). The
+// Stats panel (stats.ts; D, or the Stats button) shows it with the live state. With its "Wait before playing from menu"
+// switch on, a title the disc starts waits on a notice instead of going to the web client's player.
 import { AutoplayGate } from "./autoplay.js";
+import { DebugLog, Level, tabStore } from "./debuglog.js";
 import { discButton } from "./dom.js";
-import { embedInPlayer, isBackKey, isEmbedded, isInfoKey, PlayHandoff } from "./embed.js";
+import { checkedMessage, CheckResult, embedInPlayer, isBackKey, isEmbedded, isInfoKey, PlayHandoff } from "./embed.js";
 import { ButtonJson, CellJson, DvdVm, MediaCell, MenuJson, Pack } from "./dvdvm.js";
-import { describeHandoff, handoffFor, StreamRegs, titleAction } from "./handoff.js";
+import { describeHandoff, handoffDetail, handoffFor, handoffReasons, StreamRegs, titleAction, waitNotice } from "./handoff.js";
+import { StatsPanel } from "./stats.js";
 import {
   browserStore, DiscInfo, encodePath, fmt, forgetPageLogin, HttpError, Jellyfin, loginsFor, MediaItem, mediaItems,
   mediaKey, PlayRequest, requestKey, savedLogins, savePageLogin, serverRoot, StubPlayback, subtitleLabel,
 } from "./playback.js";
+
+declare const __PLAYER_VERSION__: string;
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -64,6 +72,9 @@ let items = new Map<string, MediaItem>();
 let baseline: StreamRegs | null = null;
 /** A title went to the web client's player; the page does nothing more. */
 let handedOff = false;
+/** A hand-off held by "Wait before playing from menu", until Play or Back to menu. */
+let held: PlayHandoff | null = null;
+let serverVersion = "";
 let timers: number[] = [];
 let drawnCell: CellJson | null = null;
 let titleWatch: { media: string; cellEnd: number | null } | null = null;
@@ -73,35 +84,86 @@ const stage = $<HTMLDivElement>("stage");
 const menuLayer = $<HTMLDivElement>("menu");
 const titleLayer = $<HTMLDivElement>("title");
 const statusEl = $<HTMLDivElement>("status");
-const traceEl = $<HTMLPreElement>("trace");
-const regsEl = $<HTMLPreElement>("regs");
 const bar = $<HTMLDivElement>("bar");
 const unblock = $<HTMLButtonElement>("unblock");
+const waitEl = $<HTMLDivElement>("wait");
 
 const autoplay = new AutoplayGate(() => {
   unblock.hidden = false;
-  status("The browser held back the menu's sound. Press Start.");
+  status("The browser held back the menu's sound. Press Start.", "warn");
 });
 
-// ---------------------------------------------------------------------------- trace / status
+// ---------------------------------------------------------------------------- the log, the status line and Stats
 
-const trace: string[] = [];
+const store = browserStore();
+const dlog = new DebugLog(tabStore(window));
+
+/** The VM's trace: the commands it runs. */
 function log(s: string): void {
-  trace.push(s);
-  if (trace.length > 400) trace.splice(0, trace.length - 400);
-  traceEl.textContent = trace.join("\n");
-  traceEl.scrollTop = traceEl.scrollHeight;
+  dlog.trace(s);
 }
+
+let lastStatus = "";
+/** The status line (the page opened by hand shows it), and the log. A motion menu that loops doesn't repeat its line. */
+function status(s: string, level: Level = "info"): void {
+  statusEl.textContent = s;
+  if (s !== lastStatus || level !== "info") dlog.add(level, s);
+  lastStatus = s;
+}
+
+function mediaState(el: HTMLMediaElement | null): string {
+  if (!el) return "none";
+  if (!el.paused) return el.muted ? "playing (muted)" : "playing";
+  return autoplay.blocked ? "held back by the browser" : "paused";
+}
+
+/** The live state at the top of the Stats panel and of a copied log. */
+function liveState(): string[] {
+  const lines = [
+    `Disc: ${loaded ? pack.disc.name : "no pack loaded"}; pack ${discId ?? params.get("pack") ?? "none"}; schema ${loaded ? pack.schema : "none"}`,
+  ];
+  if (!vm) lines.push("VM: not started");
+  else {
+    const sp = vm.sprm[2];
+    lines.push(
+      `VM: ${vm.stopped ? "stopped" : `${vm.where()} cell ${vm.state.cellN}`}`,
+      `Title ${vm.sprm[4]}, chapter ${vm.sprm[7]}; audio (SPRM 1) ${vm.sprm[1]}; subpicture (SPRM 2) 0x${sp.toString(16)} ` +
+        `(stream ${sp & 0x3f}, ${sp & 0x40 ? "shown" : "hidden"}); button (SPRM 8) ${vm.highlighted}`,
+      `GPRMs: ${Array.from(vm.gprm).map((v, i) => `g${i}=${v}`).join(" ")}`,
+    );
+    const menu = drawnCell?.menu;
+    lines.push(
+      menu
+        ? `Menu: ${menu.buttons.length} buttons; background video ${mediaState(menuLayer.querySelector("video"))}, audio ${mediaState(bgAudio)}`
+        : `Menu: none showing${vm.state.domain === "VTS" ? " (a title)" : ""}`,
+    );
+    if (baseline) lines.push(`At the first button press: audio (SPRM 1) ${baseline.audio}, subpicture (SPRM 2) 0x${baseline.subp.toString(16)}`);
+  }
+  lines.push(
+    `Sign-in: ${$("jf-account").textContent ?? ""}`,
+    `Library: ${$("jf-state").textContent ?? ""}`,
+    `Versions: plugin ${__PLAYER_VERSION__}, server ${serverVersion || "unknown"}`,
+    `Open ${dlog.run} of the Disc menu in this tab, ${embedded ? "in the overlay" : "on the page opened by hand"}; ` +
+      `wait before playing from menu ${stats.wait ? "on" : "off"}`,
+  );
+  return lines;
+}
+
+const stats = new StatsPanel(document, stage, dlog, {
+  embedded,
+  state: liveState,
+  prefs: store,
+  toggles: [$<HTMLButtonElement>("bar-stats"), $<HTMLButtonElement>("btn-stats")],
+  onWait: (on) => dlog.add("info", `Wait before playing from menu: ${on ? "on" : "off"}`),
+});
 
 function showRegs(): void {
-  const g = Array.from(vm.gprm).map((v, i) => `g${i}=${v}`).join(" ");
-  regsEl.textContent =
-    `${vm.stopped ? "stopped" : vm.where()} cell ${vm.state.cellN}\n${g}\n` +
-    `audio(SPRM1)=${vm.sprm[1]} subp(SPRM2)=0x${vm.sprm[2].toString(16)} button(SPRM8)=${vm.highlighted}`;
+  stats.refresh();
 }
 
-function status(s: string): void {
-  statusEl.textContent = s;
+/** A menu file that doesn't load is an error in the log (the menu shows without it). */
+function watchLoad(el: HTMLImageElement | HTMLMediaElement, file: string): void {
+  el.addEventListener("error", () => dlog.add("error", `Couldn't load the menu file ${file}`), { once: true });
 }
 
 // ---------------------------------------------------------------------------- the main loop
@@ -129,7 +191,7 @@ function next(): void {
 
 function render(): void {
   clearTimers();
-  if (handedOff) return;
+  if (handedOff || held) return;
   showRegs();
   if (vm.stopped) {
     stopTitle();
@@ -139,13 +201,15 @@ function render(): void {
   }
   const cell = vm.cell!;
   if (vm.state.domain === "VTS") {
-    showMenuLayer(null);
     const m = vm.media;
     const item = m ? items.get(mediaKey(m)) : undefined;
     const action = titleAction({ embedded, mapped: !!m, inLibrary: !!item, pressed: !!baseline });
+    // A held hand-off keeps the last menu showing, dimmed, behind its notice.
+    if (action === "hand-off" && stats.wait) return handOff(m!, item!);
+    showMenuLayer(null);
     if (action === "missing") {
       stopTitle();
-      status(`Title ${vm.sprm[4]} chapter ${vm.sprm[7]}: not in the library (${cell.dur.toFixed(1)} s), skipped`);
+      status(`Title ${vm.sprm[4]} chapter ${vm.sprm[7]}: not in the library (${cell.dur.toFixed(1)} s), skipped`, "warn");
       later(500, next);
     } else if (action === "intro") skipTitle();
     else if (action === "hand-off") handOff(m!, item!);
@@ -164,10 +228,12 @@ function skipTitle(): void {
   const { vtsN, pgcN } = vm.state;
   const where = `title ${vm.sprm[4]}`;
   let guard = 0;
+  let length = 0;
   while (!vm.stopped && vm.state.domain === "VTS" && vm.state.vtsN === vtsN && vm.state.pgcN === pgcN && guard++ < 1000) {
+    length += vm.cell?.dur ?? 0;
     vm.cellEnded();
   }
-  status(`The disc started ${where} before any menu button was pressed: skipped, to get to the menu`);
+  status(`The disc started ${where} before any menu button was pressed: skipped (${length.toFixed(1)} s), to get to the menu`, "warn");
   log(`skipped ${where} (no menu button pressed yet)`);
   later(500, render);
 }
@@ -223,6 +289,7 @@ function drawMenu(cell: CellJson): void {
     if (bg?.video) {
       const v = document.createElement("video");
       v.src = packUrl(bg.video);
+      watchLoad(v, bg.video);
       v.className = "layer";
       v.playsInline = true;
       v.addEventListener("ended", () => afterCell(cell));
@@ -231,18 +298,21 @@ function drawMenu(cell: CellJson): void {
     } else if (bg?.image) {
       const i = document.createElement("img");
       i.src = packUrl(bg.image);
+      watchLoad(i, bg.image);
       i.className = "layer";
       i.alt = "";
       menuLayer.append(i);
     }
     if (bg?.audio) {
       bgAudio = new Audio(packUrl(bg.audio));
+      watchLoad(bgAudio, bg.audio);
       bgAudio.addEventListener("ended", () => afterCell(cell));
       autoplay.play(bgAudio, false);
     }
     if (menu.overlay) {
       const o = document.createElement("img");
       o.src = packUrl(menu.overlay);
+      watchLoad(o, menu.overlay);
       o.className = "layer";
       o.alt = "";
       menuLayer.append(o);
@@ -261,6 +331,7 @@ function drawMenu(cell: CellJson): void {
         if (b[st]) {
           const i = document.createElement("img");
           i.src = packUrl(b[st]!);
+          watchLoad(i, b[st]!);
           i.className = st;
           i.alt = "";
           d.append(i);
@@ -326,6 +397,7 @@ function highlight(n: number): void {
 /** The viewer pressed a menu button (a key, a click or a tap). The disc's own forced or automatic presses don't count. */
 function viewerPress(b: ButtonJson): void {
   baseline ??= { audio: vm.sprm[1], subp: vm.sprm[2] };
+  dlog.add("info", `Button ${b.n} pressed${b.txt ? ` (${b.txt})` : ""} in ${vm.where()}`);
   press(b);
 }
 
@@ -380,10 +452,29 @@ function barKey(e: KeyboardEvent): void {
   e.preventDefault();
 }
 
+/** Keys while the focus is on the wait notice: Left and Right move between its buttons, Enter presses (natively). */
+function waitKey(e: KeyboardEvent): boolean {
+  if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return e.key === "Enter" || e.key === " ";
+  const buttons = [...waitEl.querySelectorAll<HTMLButtonElement>("button")];
+  const at = buttons.indexOf(document.activeElement as HTMLButtonElement);
+  buttons[(at + 1) % buttons.length]?.focus();
+  e.preventDefault();
+  return true;
+}
+
 function onKey(e: KeyboardEvent): void {
   // Typing in the sign-in form isn't a remote's key, and before Start there is nothing to send keys to.
   const t = e.target as HTMLElement | null;
   if (t?.closest("input, textarea, select, [contenteditable]")) return;
+  if ((e.key === "d" || e.key === "D") && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    e.preventDefault();
+    stats.toggle();
+    return;
+  }
+  if (t && stats.el.contains(t)) {
+    if (stats.key(e, isBackKey(e)) || e.key === "Enter" || e.key === " ") return;
+  }
+  if (t && waitEl.contains(t) && waitKey(e)) return;
   if (embedded) {
     if (bar.contains(t)) return barKey(e);
     if (isInfoKey(e)) {
@@ -405,7 +496,7 @@ function onKey(e: KeyboardEvent): void {
     menuKey("root");
   } else if (k === "t" || k === "T") {
     menuKey("title");
-  } else if (!menuLayer.hidden) {
+  } else if (!menuLayer.hidden && !held) {
     const b = currentButtons().find((x) => x.n === vm.highlighted);
     if (!b) return;
     const dir = { ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowRight: "right" }[k] as
@@ -421,8 +512,9 @@ function onKey(e: KeyboardEvent): void {
 
 function menuKey(which: "root" | "title"): void {
   if (!running) return;
+  hideWait();
   stopTitle();
-  if (!vm.menuCall(which)) status(`The disc has no ${which} menu here.`);
+  if (!vm.menuCall(which)) status(`The disc has no ${which} menu here.`, "warn");
   render();
 }
 
@@ -484,16 +576,66 @@ function handoff(m: MediaCell, item: MediaItem): PlayHandoff {
   return handoffFor(item, request(m), { audio: vm.sprm[1], subp: vm.sprm[2] }, baseline ?? { audio: vm.sprm[1], subp: vm.sprm[2] });
 }
 
-/** In the overlay: the title goes to the web client's own player, and the menu is done. */
+/**
+ * In the overlay: the title goes to the web client's own player, and the menu is done. The log gets what goes with it
+ * and why; with "Wait before playing from menu" on, the hand-off waits on a notice instead (waitHandOff).
+ */
 function handOff(m: MediaCell, item: MediaItem): void {
   const h = handoff(m, item);
-  const line = `Handing ${request(m).label} to Jellyfin's player: ${describeHandoff(h)}`;
-  status(line);
-  log(line);
+  const r = request(m);
+  const now = { audio: vm.sprm[1], subp: vm.sprm[2] };
+  const detail = handoffDetail(h, handoffReasons(item, r, now, baseline ?? now));
+  if (stats.wait) {
+    status(`Waiting before playing ${r.label} from the menu: ${describeHandoff(h)}`);
+    dlog.add("info", `It would send: ${detail}`);
+    waitHandOff(h);
+    return;
+  }
+  status(`Handing ${r.label} to Jellyfin's player: ${describeHandoff(h)}`);
+  dlog.add("info", `It sends: ${detail}`);
+  sendHandOff(h);
+}
+
+function sendHandOff(h: PlayHandoff): void {
+  log(`hand-off: ${describeHandoff(h)}`);
+  // Written now, so the web client adds what it made of the hand-off to this log.
+  dlog.flush();
   handedOff = true;
   stopAll();
   hideBar();
   overlay!.handOff(h);
+}
+
+/** Holds the hand-off on a notice: the overlay checks everything but the Play command (CHECK), the menu's media stops. */
+function waitHandOff(h: PlayHandoff): void {
+  held = h;
+  clearTimers();
+  bgAudio?.pause();
+  menuLayer.querySelector("video")?.pause();
+  menuLayer.classList.add("held");
+  stopTitle();
+  const text = $<HTMLParagraphElement>("wait-text");
+  text.textContent = waitNotice(h).join("\n");
+  waitEl.hidden = false;
+  $<HTMLButtonElement>("wait-play").focus();
+  overlay!.check(h);
+}
+
+/** The overlay's answer to CHECK: in the log, and on the notice when no session would get the Play command. */
+function checked(r: CheckResult): void {
+  if (!held) return;
+  dlog.add(r.session ? "info" : "warn", `Checked without playing: ${r.detail}`);
+  if (!r.session) {
+    const text = $<HTMLParagraphElement>("wait-text");
+    text.textContent = [...waitNotice(held), "Session: none found (Play would open the details page)"].join("\n");
+  }
+}
+
+function hideWait(): void {
+  held = null;
+  waitEl.hidden = true;
+  menuLayer.classList.remove("held");
+  if (waitEl.contains(document.activeElement)) (document.activeElement as HTMLElement).blur();
 }
 
 function cellEndFor(m: MediaCell): number | null {
@@ -533,7 +675,6 @@ function wirePlayback(p: StubPlayback): void {
 
 // ---------------------------------------------------------------------------- Jellyfin
 
-const store = browserStore();
 const jfState = (s: string) => ($<HTMLSpanElement>("jf-state").textContent = s);
 
 /** The server with no login (signing in), its id, and the signed-in connection once there is one. */
@@ -575,7 +716,7 @@ function signedIn(conn: Jellyfin, name: string): void {
 function noOverlayLogin(): void {
   jf = null;
   const why = "Jellyfin didn't take the web client's login. Sign in to the web client again, then open the Disc menu.";
-  status(why);
+  status(why, "error");
   $("splash-note").textContent = why;
   jfState("Not connected.");
 }
@@ -705,7 +846,7 @@ async function openItem(): Promise<void> {
     if (!discId) {
       const discs = await conn.discs(itemId!);
       if (discs.length === 0) {
-        status("This series or movie has no disc menus.");
+        status("This series or movie has no disc menus.", "warn");
         $("splash-note").textContent = "This series or movie has no disc menus.";
         jfState("Connected; no disc menus here.");
         return;
@@ -724,8 +865,8 @@ async function openItem(): Promise<void> {
     const msg = (e as Error).message;
     if (e instanceof HttpError && e.status === 401) return loginRefused();
     if (e instanceof HttpError && (e.status === 404 || e.status === 403))
-      status("This disc's menus aren't on this server, or this account can't see them.");
-    else status(`Couldn't open the disc: ${msg}`);
+      status("This disc's menus aren't on this server, or this account can't see them.", "error");
+    else status(`Couldn't open the disc: ${msg}`, "error");
     $("splash-note").textContent = statusEl.textContent;
     jfState(`Not connected: ${msg}`);
   }
@@ -773,6 +914,8 @@ async function findMedia(jf: Jellyfin): Promise<void> {
   const n = media.Titles.length;
   jfState(`Connected: ${media.Name}, ${n - missing.length} of ${n} files found` +
     (missing.length ? ` (missing ${missing.join(", ")})` : ""));
+  dlog.add(missing.length ? "warn" : "info", `Library: ${n - missing.length} of ${n} of the pack's files found` +
+    (missing.length ? `; missing ${missing.join(", ")}` : ""));
   if (running && !vm.stopped && vm.state.domain === "VTS") render();
 }
 
@@ -781,8 +924,10 @@ async function findMedia(jf: Jellyfin): Promise<void> {
 function restart(): void {
   if (!loaded) return;
   stopTitle();
-  trace.length = 0;
+  hideWait();
   baseline = null;
+  dlog.started();
+  dlog.add("info", `Start disc: ${pack.disc.name}`);
   vm = new DvdVm(pack, { log });
   running = true;
   vm.start();
@@ -825,6 +970,7 @@ async function main(): Promise<void> {
   const go = $<HTMLButtonElement>("start");
   go.disabled = true;
   wirePlayback(playback);
+  stats.restore();
   try {
     store.removeItem("discmenu.apiKey"); // the API key earlier versions kept
   } catch {
@@ -843,7 +989,27 @@ async function main(): Promise<void> {
     if (running && drawnCell?.menu) status(`${vm.where()}: menu, ${drawnCell.menu.buttons.length} buttons`);
   });
   // The menus keep running for a page the browser restores from its back-forward cache; the stub's clock stops.
-  window.addEventListener("pagehide", stopTitle);
+  window.addEventListener("pagehide", () => {
+    stopTitle();
+    dlog.flush();
+  });
+  window.addEventListener("error", (e) => dlog.add("error", `Script error: ${e.message}${e.filename ? ` (${e.filename}:${e.lineno})` : ""}`));
+  window.addEventListener("unhandledrejection", (e) => {
+    const r = e.reason as { message?: unknown } | null;
+    dlog.add("error", `Unhandled rejection: ${typeof r?.message === "string" ? r.message : String(e.reason)}`);
+  });
+  $("btn-stats").addEventListener("click", () => stats.toggle(true));
+  $("wait-back").addEventListener("click", () => {
+    dlog.add("info", "Back to menu from the wait notice");
+    menuKey("root");
+  });
+  $("wait-play").addEventListener("click", () => {
+    const h = held;
+    if (!h) return;
+    hideWait();
+    dlog.add("info", "Play pressed on the wait notice");
+    sendHandOff(h);
+  });
   if (embedded) {
     document.documentElement.classList.add("embedded");
     // Over the web client, whose default theme is dark.
@@ -851,13 +1017,19 @@ async function main(): Promise<void> {
     $("bar-close").addEventListener("click", () => overlay!.requestClose());
     $("bar-menu").addEventListener("click", () => menuKey("root"));
     $("bar-title").addEventListener("click", () => menuKey("title"));
+    $<HTMLButtonElement>("bar-stats").hidden = false;
+    $("bar-stats").addEventListener("click", () => stats.toggle(true));
     bar.addEventListener("focusin", () => showBar());
+    window.addEventListener("message", (e) => {
+      const r = checkedMessage(e, window.parent, location.origin);
+      if (r) checked(r);
+    });
     // A pointer that moves shows the bar; a resting one doesn't. A tap that misses every menu button shows it too.
     document.addEventListener("pointermove", (e) => {
       if (e.pointerType === "mouse") showBar();
     });
     stage.addEventListener("click", (e) => {
-      if (!(e.target as Element).closest(".btn, button")) showBar();
+      if (!(e.target as Element).closest(".btn, button, .stats, .wait")) showBar();
     });
   }
   go.addEventListener("click", startDisc);
@@ -867,11 +1039,12 @@ async function main(): Promise<void> {
     try {
       const info = await server.publicInfo();
       serverId = info.Id;
+      serverVersion = info.Version ?? "";
       if (info.ServerName) $("server-name").textContent = info.ServerName;
       if (await savedSignIn()) await openItem();
       else await showSignIn("Sign in to Jellyfin to open this disc's menus.");
     } catch (e) {
-      status(`Couldn't reach Jellyfin: ${(e as Error).message}`);
+      status(`Couldn't reach Jellyfin: ${(e as Error).message}`, "error");
       $("splash-note").textContent = statusEl.textContent;
       jfState("Not connected.");
     }
@@ -880,13 +1053,13 @@ async function main(): Promise<void> {
   $("jf-account").textContent = "No sign-in for a test pack; title cells show what would play.";
   const testPack = testPackBase();
   if (!testPack) {
-    status("No menu pack given: open this page from a series or movie (?item=<id>), or with ?pack=<pack folder>/.");
+    status("No menu pack given: open this page from a series or movie (?item=<id>), or with ?pack=<pack folder>/.", "error");
     return;
   }
   try {
     await loadPack(testPack, null);
   } catch (e) {
-    status(`Couldn't load the menu pack: ${(e as Error).message}`);
+    status(`Couldn't load the menu pack: ${(e as Error).message}`, "error");
   }
 }
 

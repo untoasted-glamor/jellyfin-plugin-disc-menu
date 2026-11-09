@@ -1,6 +1,8 @@
 // The messages between the overlay and the player: which ones count, the hand-off's checks, and the remote's keys.
 import { describe, expect, it } from "vitest";
-import { CLOSE_REQUEST, embedInPlayer, embedMessage, isBackKey, isEmbedded, isInfoKey, parsePlay, PLAY } from "../src/embed.js";
+import {
+  CHECK, CHECKED, checkedMessage, CLOSE_REQUEST, embedInPlayer, embedMessage, isBackKey, isEmbedded, isInfoKey, parsePlay, PLAY,
+} from "../src/embed.js";
 
 const ORIGIN = "http://jf.test";
 const ITEM = "41f6b840b8c91fba90ca5906e7544c90";
@@ -24,6 +26,24 @@ describe("messages", () => {
     expect(embedMessage(msg({ type: "discmenu:close" }), from, ORIGIN)).toBeNull();
     expect(embedMessage(msg(null), from, ORIGIN)).toBeNull();
     expect(embedMessage(msg({ type: CLOSE_REQUEST }), null, ORIGIN)).toBeNull();
+  });
+
+  it("takes a check of a held hand-off, with the same checks as a hand-off", () => {
+    const play = { itemId: ITEM, name: "S01E01" };
+    expect(embedMessage(msg({ type: CHECK, play }), from, ORIGIN)).toEqual({ type: CHECK, play });
+    expect(embedMessage(msg({ type: CHECK, play: { ...play, url: "x" } }), from, ORIGIN)).toBeNull();
+  });
+
+  it("player side: takes the overlay's answer from its parent on our origin only, and well formed", () => {
+    const ok = { type: CHECKED, result: { session: "c0ffee00c0ffee00c0ffee00c0ffee00", detail: "Would send POST ..." } };
+    expect(checkedMessage(msg(ok), from, ORIGIN)).toEqual(ok.result);
+    expect(checkedMessage(msg({ type: CHECKED, result: { session: null, detail: "none" } }), from, ORIGIN)).toEqual({ session: null, detail: "none" });
+    expect(checkedMessage(msg(ok, parent, "http://evil.test"), from, ORIGIN)).toBeNull();
+    expect(checkedMessage(msg(ok, {}), from, ORIGIN)).toBeNull();
+    expect(checkedMessage(msg({ type: CHECKED, result: { session: "<b>", detail: "x" } }), from, ORIGIN)).toBeNull();
+    expect(checkedMessage(msg({ type: CHECKED, result: { session: null, detail: "x".repeat(2001) } }), from, ORIGIN)).toBeNull();
+    expect(checkedMessage(msg({ type: CHECKED, result: { session: null, detail: "x", extra: 1 } }), from, ORIGIN)).toBeNull();
+    expect(checkedMessage(msg({ type: PLAY, result: ok.result }), from, ORIGIN)).toBeNull();
   });
 
   it("drops a hand-off whose data doesn't pass the checks", () => {
@@ -115,9 +135,11 @@ describe("the player in the overlay", () => {
     const o = embedInPlayer(win);
     o.requestClose();
     o.handOff({ itemId: ITEM, name: "S01E01", startTicks: 10 });
+    o.check({ itemId: ITEM, name: "S01E01" });
     expect(posted).toEqual([
       [{ type: CLOSE_REQUEST }, ORIGIN],
       [{ type: PLAY, play: { itemId: ITEM, name: "S01E01", startTicks: 10 } }, ORIGIN],
+      [{ type: CHECK, play: { itemId: ITEM, name: "S01E01" } }, ORIGIN],
     ]);
   });
 });
