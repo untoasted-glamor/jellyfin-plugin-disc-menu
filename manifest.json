@@ -3,6 +3,14 @@
         "guid": "bea19561-f7f9-44d6-a4d2-c46b41d04a94",
         "versions": [
             {
+                "version": "0.3.0.0",
+                "changelog": "Disc menu button next to Play (needs the JavaScript Injector plugin); the player opens over the web client, and closing it stops the playing title",
+                "targetAbi": "12.0.0.0",
+                "sourceUrl": "https://github.com/untoasted-glamor/jellyfin-plugin-disc-menu/releases/download/v0.3.0/disc-menu_0.3.0.0.zip",
+                "checksum": "c030c48d117716a0b205b140d1188b70",
+                "timestamp": "2026-11-09T03:50:24Z"
+            },
+            {
                 "version": "0.2.0.0",
                 "changelog": "Plays a DVD's own menus in a browser: a Disc menu link on series and movies that have a menu pack, and a player page that signs in as the viewer and plays the episodes or film the menus start, with the audio and subtitles chosen in the menus.",
                 "targetAbi": "12.0.0.0",
