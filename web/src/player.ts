@@ -6,7 +6,11 @@
 // The page opens a series' or movie's pack from the plugin with ?item=<id> (and &disc=<pack>, else the item's only
 // pack or a choice). It signs in with the web client's saved login where the browser has one, else its own sign-in
 // (Quick Connect, or a user name and password); see jellyfin.ts. ?pack=<folder>/ opens a pack folder on the same
-// server with no login and stub playback, for testing the menus.
+// server with no login and stub playback, for testing the menus. With &embed=1 inside a frame, the page runs in the
+// Disc menu button's overlay in the web client (see embed.ts): Back asks the overlay to close, and Close stops the title
+// before the overlay goes.
+import { discButton } from "./dom.js";
+import { embedInPlayer, isBackKey, isEmbedded } from "./embed.js";
 import { ButtonJson, CellJson, DvdVm, MediaCell, MenuJson, Pack } from "./dvdvm.js";
 import {
   browserStore, DiscInfo, encodePath, fmt, forgetPageLogin, HttpError, Jellyfin, JellyfinPlayback, mediaItems, mediaKey,
@@ -19,6 +23,9 @@ const params = new URLSearchParams(location.search);
 /** The series or movie whose pack plays, from ?item=. */
 const itemId = params.get("item");
 let discId = params.get("disc");
+/** Inside the Disc menu button's overlay. */
+const embedded = isEmbedded(window, params);
+let requestClose: () => void = () => {};
 
 /** A test pack folder, from ?pack=<relative folder>/. Only this server's own addresses are accepted. */
 function testPackBase(): string | null {
@@ -286,7 +293,13 @@ function press(b: ButtonJson): void {
 function onKey(e: KeyboardEvent): void {
   // Typing in the sign-in form isn't a remote's key, and before Start there is nothing to send keys to.
   const t = e.target as HTMLElement | null;
-  if (t?.closest("input, textarea, select, [contenteditable]") || !running) return;
+  if (t?.closest("input, textarea, select, [contenteditable]")) return;
+  if (embedded && isBackKey(e)) {
+    e.preventDefault();
+    requestClose();
+    return;
+  }
+  if (!running) return;
   const k = e.key;
   if (k === "m" || k === "M" || k === "Escape") {
     menuKey("root");
@@ -315,9 +328,20 @@ function menuKey(which: "root" | "title"): void {
 
 // ---------------------------------------------------------------------------- titles
 
-function stopTitle(): void {
-  if (playback.key) playback.stop();
+/** Stops the playing title; the promise settles once the server was asked to end its transcode. */
+function stopTitle(): Promise<void> {
+  const stopped = playback.key ? playback.stop() : Promise.resolve();
   titleWatch = null;
+  return stopped;
+}
+
+/** Stops everything that plays: the title, and a menu's background video or audio. For closing the page. */
+function stopAll(): Promise<void> {
+  clearTimers();
+  running = false;
+  bgAudio?.pause();
+  menuLayer.querySelector("video")?.pause();
+  return stopTitle();
 }
 
 /** "S01E03" for an episode, the file name for a movie. */
@@ -599,20 +623,16 @@ function chooseDisc(discs: DiscInfo[]): void {
   status("This has more than one disc. Pick one.");
   const list = $<HTMLDivElement>("discs");
   list.replaceChildren(
-    ...discs.map((d) => {
-      const b = document.createElement("button");
-      b.type = "button";
-      b.textContent = d.Season === undefined ? d.Name : `${d.Name} (season ${d.Season})`;
-      b.addEventListener("click", () => {
+    ...discs.map((d) =>
+      discButton(document, d, () => {
         discId = d.Id;
         list.replaceChildren();
         const q = new URLSearchParams(location.search);
         q.set("disc", d.Id);
         history.replaceState(null, "", `?${q}`);
         void openItem();
-      });
-      return b;
-    }),
+      }),
+    ),
   );
 }
 
@@ -670,6 +690,8 @@ async function loadPack(packBase: string, conn: Jellyfin | null): Promise<void> 
   $("disc-name").textContent = pack.disc.name;
   loaded = true;
   $<HTMLButtonElement>("start").disabled = false;
+  // In the overlay, a remote's Enter starts the disc.
+  if (embedded) $<HTMLButtonElement>("start").focus();
   status("Ready. Press Start disc.");
 }
 
@@ -689,6 +711,15 @@ async function main(): Promise<void> {
   $("btn-title").addEventListener("click", () => menuKey("title"));
   $("btn-restart").addEventListener("click", restart);
   document.addEventListener("keydown", onKey);
+  // Leaving the page (or the overlay removing it) ends the title's transcode; the request outlives the page. The menus
+  // keep running, for a page the browser restores from its back-forward cache.
+  window.addEventListener("pagehide", () => void stopTitle());
+  if (embedded) {
+    document.documentElement.classList.add("embedded");
+    // Over the web client, whose default theme is dark.
+    document.documentElement.dataset.theme = "dark";
+    requestClose = embedInPlayer(window, stopAll);
+  }
   go.addEventListener("click", () => {
     go.parentElement!.hidden = true;
     restart();

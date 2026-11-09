@@ -14,7 +14,8 @@ export interface Playback {
   load(r: PlayRequest): Promise<void>;
   seek(t: number): void;
   time(): number;
-  stop(): void;
+  /** Stops playing; settles once the server was asked to end the title's transcode (at once for the stub). */
+  stop(): Promise<void>;
   ontime: (t: number) => void;
   onended: () => void;
   onerror: (msg: string) => void;
@@ -61,7 +62,7 @@ export class StubPlayback implements Playback {
   }
 
   async load(r: PlayRequest): Promise<void> {
-    this.stop();
+    void this.stop();
     this.key = requestKey(r);
     this.label = r.label;
     this.length = r.length;
@@ -85,10 +86,11 @@ export class StubPlayback implements Playback {
     return this.t;
   }
 
-  stop(): void {
+  stop(): Promise<void> {
     if (this.timer !== null) window.clearInterval(this.timer);
     this.timer = null;
     this.key = null;
+    return Promise.resolve();
   }
 
   private jump(s: number): void {
@@ -97,7 +99,7 @@ export class StubPlayback implements Playback {
   }
 
   private finish(): void {
-    this.stop();
+    void this.stop();
     this.onended();
   }
 
@@ -144,7 +146,7 @@ export class JellyfinPlayback implements Playback {
   }
 
   async load(r: PlayRequest): Promise<void> {
-    this.stop();
+    void this.stop();
     let p;
     try {
       p = this.pick(r);
@@ -178,14 +180,15 @@ export class JellyfinPlayback implements Playback {
     return this.el.currentTime;
   }
 
-  stop(): void {
+  stop(): Promise<void> {
     this.el.pause();
     if (this.hls) this.hls.destroy();
     this.hls = null;
     this.el.removeAttribute("src");
     this.el.load();
-    if (this.session) this.jf.stopEncoding(this.session);
+    const stopped = this.session ? this.jf.stopEncoding(this.session) : Promise.resolve();
     this.session = null;
     this.key = null;
+    return stopped;
   }
 }
