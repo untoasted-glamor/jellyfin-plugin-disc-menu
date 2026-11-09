@@ -47,6 +47,11 @@ file shifts them.
 The player page opens a pack with `DiscMenu/Player/?item={itemId}`, and `&disc={disc}` when the item has more
 than one. Until the page has its own sign-in, it asks for an API key, kept in the browser's local storage.
 
+A series or movie with at least one readable pack gets a "Disc menu" entry under its Links, pointing at
+`{base URL}/DiscMenu/Player/?item={itemId}`. The address starts at the server's root, so the page opens on the
+web client's own origin. Whether a folder has packs is cached for a minute, so a pack added or removed shows in
+the Links within a minute.
+
 ## Build
 
 Needs the .NET 10 SDK and Node.js 22. The plugin embeds the player page, so build `web/` first.
