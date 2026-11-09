@@ -17,6 +17,24 @@
 </header>
 
 <main>
+  <section class="panel signin" id="signin" hidden>
+    <h2>Sign in to <span id="server-name">Jellyfin</span></h2>
+    <p id="signin-why"></p>
+    <div id="qc" class="qc" hidden>
+      <p>Quick Connect: on a phone or computer that's signed in to Jellyfin, open your user settings, choose
+      Quick Connect and enter this code.</p>
+      <p id="qc-code" class="qc-code"></p>
+      <p id="qc-note" class="muted"></p>
+      <button type="button" id="qc-new" hidden>Get a new code</button>
+    </div>
+    <form id="pw-form" class="form">
+      <label>User name <input id="pw-user" autocomplete="username" autocapitalize="off" spellcheck="false"></label>
+      <label>Password <input id="pw-pass" type="password" autocomplete="current-password"></label>
+      <button type="submit" id="pw-submit">Sign in</button>
+    </form>
+    <p id="signin-error" class="error" role="alert"></p>
+  </section>
+
   <div id="stage" class="stage">
     <div id="menu" class="menu" hidden></div>
     <div id="title" class="title" hidden></div>
@@ -31,11 +49,9 @@
 
   <details class="panel" id="jf-panel">
     <summary>Jellyfin</summary>
-    <p>Until this page has its own sign-in, it loads a disc's menus and streams its titles with an API key
-    (Dashboard &gt; API Keys). The key stays in this browser only.</p>
-    <div class="form">
-      <label>API key <input id="jf-key" type="password" autocomplete="off" spellcheck="false"></label>
-      <button type="button" id="jf-connect">Connect</button>
+    <div class="form account">
+      <p id="jf-account">Not signed in.</p>
+      <button type="button" id="jf-switch" hidden>Sign out</button>
     </div>
     <p id="jf-state" class="muted">Not connected: title cells show what would play.</p>
   </details>

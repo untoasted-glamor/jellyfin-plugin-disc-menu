@@ -2,11 +2,11 @@
 // transcodes to H.264/AAC and burns in the chosen subtitle); StubPlayback only shows what would play and runs
 // a clock, so the menus can be tested without a server.
 import Hls from "hls.js";
-import { DiscInfo, DiscMedia, MediaItem, pickStreams, PlayRequest, requestKey, subtitleLabel } from "./media.js";
+import { Jellyfin } from "./jellyfin.js";
+import { MediaItem, pickStreams, PlayRequest, requestKey, subtitleLabel } from "./media.js";
 
 export * from "./media.js";
-
-declare const __PLAYER_VERSION__: string;
+export * from "./jellyfin.js";
 
 export interface Playback {
   readonly el: HTMLElement;
@@ -114,98 +114,6 @@ export function fmt(s: number): string {
 }
 
 // ---------------------------------------------------------------------------- Jellyfin
-
-/** The Jellyfin server this page is served from. Every URL is relative to it, so a base URL such as /jellyfin works. */
-export function serverRoot(): string {
-  return new URL(document.documentElement.dataset.serverRoot ?? "../", location.href).href;
-}
-
-export class Jellyfin {
-  readonly deviceId: string;
-  constructor(
-    readonly base: string,
-    private readonly key: string,
-  ) {
-    if (!this.base.endsWith("/")) this.base += "/";
-    let id = "";
-    try {
-      id = localStorage.getItem("discmenu.deviceId") ?? "";
-      if (!id) localStorage.setItem("discmenu.deviceId", (id = "disc-menu-" + Math.random().toString(36).slice(2)));
-    } catch {
-      id = "disc-menu";
-    }
-    this.deviceId = id;
-  }
-
-  private auth(): string {
-    return `MediaBrowser Client="Disc Menu", Device="Browser", DeviceId="${this.deviceId}", Version="${__PLAYER_VERSION__}", Token="${this.key}"`;
-  }
-
-  async get<T>(path: string): Promise<T> {
-    const r = await fetch(this.base + path, { headers: { Authorization: this.auth() } });
-    if (!r.ok) throw new HttpError(r.status, `${r.status} ${r.statusText} for ${path.split("?")[0]}`);
-    return (await r.json()) as T;
-  }
-
-  /** A URL for an element that can't send a header (img, video, audio): the token goes in ApiKey=. */
-  withKey(url: string): string {
-    return `${url}${url.includes("?") ? "&" : "?"}ApiKey=${encodeURIComponent(this.key)}`;
-  }
-
-  /** The plugin's address for a series' or movie's packs. */
-  discsPath(item: string): string {
-    return `DiscMenu/Items/${encodeURIComponent(item)}/Discs`;
-  }
-
-  discs(item: string): Promise<DiscInfo[]> {
-    return this.get<DiscInfo[]>(this.discsPath(item));
-  }
-
-  /** Which library item plays each file the pack names, with its streams (looked up on every call). */
-  media(item: string, disc: string): Promise<DiscMedia> {
-    return this.get<DiscMedia>(`${this.discsPath(item)}/${encodeURIComponent(disc)}/Media`);
-  }
-
-  streamUrl(item: MediaItem, audio: number | null, sub: number | null, playSessionId: string): string {
-    const q = new URLSearchParams({
-      MediaSourceId: item.mediaSourceId,
-      DeviceId: this.deviceId,
-      PlaySessionId: playSessionId,
-      ApiKey: this.key,
-      VideoCodec: "h264",
-      AudioCodec: "aac",
-      TranscodingMaxAudioChannels: "2",
-      VideoBitrate: "8000000",
-      AudioBitrate: "192000",
-      SegmentContainer: "ts",
-      MinSegments: "1",
-      BreakOnNonKeyFrames: "True",
-    });
-    if (audio !== null) q.set("AudioStreamIndex", String(audio));
-    if (sub !== null) {
-      q.set("SubtitleStreamIndex", String(sub));
-      q.set("SubtitleMethod", "Encode");
-    }
-    return `${this.base}Videos/${item.id}/master.m3u8?${q}`;
-  }
-
-  stopEncoding(playSessionId: string): void {
-    const q = new URLSearchParams({ deviceId: this.deviceId, playSessionId });
-    fetch(`${this.base}Videos/ActiveEncodings?${q}`, {
-      method: "DELETE",
-      headers: { Authorization: this.auth() },
-    }).catch(() => {});
-  }
-}
-
-export class HttpError extends Error {
-  constructor(
-    readonly status: number,
-    message: string,
-  ) {
-    super(message);
-  }
-}
 
 export class JellyfinPlayback implements Playback {
   readonly el: HTMLVideoElement;

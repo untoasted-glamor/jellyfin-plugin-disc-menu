@@ -4,12 +4,13 @@
 // T = Title menu. Mouse hover selects, click or tap activates.
 //
 // The page opens a series' or movie's pack from the plugin with ?item=<id> (and &disc=<pack>, else the item's only
-// pack or a choice), signed in with an API key until the page has its own sign-in. ?pack=<folder>/ opens a pack
-// folder on the same server with no login and stub playback, for testing the menus.
+// pack or a choice). It signs in with the web client's saved login where the browser has one, else its own sign-in
+// (Quick Connect, or a user name and password); see jellyfin.ts. ?pack=<folder>/ opens a pack folder on the same
+// server with no login and stub playback, for testing the menus.
 import { ButtonJson, CellJson, DvdVm, MediaCell, MenuJson, Pack } from "./dvdvm.js";
 import {
-  DiscInfo, encodePath, fmt, HttpError, Jellyfin, JellyfinPlayback, mediaItems, mediaKey, Playback, PlayRequest,
-  requestKey, serverRoot, StubPlayback, subtitleLabel,
+  browserStore, DiscInfo, encodePath, fmt, forgetPageLogin, HttpError, Jellyfin, JellyfinPlayback, mediaItems, mediaKey,
+  Playback, PlayRequest, requestKey, savedLogins, savePageLogin, serverRoot, StubPlayback, subtitleLabel,
 } from "./playback.js";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -39,6 +40,9 @@ function packUrl(file: string): string {
 
 let pack: Pack;
 let vm: DvdVm;
+/** A pack is loaded, and the viewer has started the disc (so there is a VM to send keys to). */
+let loaded = false;
+let running = false;
 let playback: Playback = new StubPlayback();
 let timers: number[] = [];
 let drawnCell: CellJson | null = null;
@@ -280,6 +284,9 @@ function press(b: ButtonJson): void {
 }
 
 function onKey(e: KeyboardEvent): void {
+  // Typing in the sign-in form isn't a remote's key, and before Start there is nothing to send keys to.
+  const t = e.target as HTMLElement | null;
+  if (t?.closest("input, textarea, select, [contenteditable]") || !running) return;
   const k = e.key;
   if (k === "m" || k === "M" || k === "Escape") {
     menuKey("root");
@@ -300,6 +307,7 @@ function onKey(e: KeyboardEvent): void {
 }
 
 function menuKey(which: "root" | "title"): void {
+  if (!running) return;
   stopTitle();
   if (!vm.menuCall(which)) status(`The disc has no ${which} menu here.`);
   render();
@@ -388,73 +396,206 @@ function wirePlayback(p: Playback): void {
 
 // ---------------------------------------------------------------------------- Jellyfin
 
-const keyInput = () => $<HTMLInputElement>("jf-key");
+const store = browserStore();
 const jfState = (s: string) => ($<HTMLSpanElement>("jf-state").textContent = s);
 
-function storedKey(): string {
-  try {
-    return localStorage.getItem("discmenu.apiKey") ?? "";
-  } catch {
-    return "";
+/** The server with no login (signing in), its id, and the signed-in connection once there is one. */
+let server: Jellyfin | null = null;
+let serverId = "";
+let jf: Jellyfin | null = null;
+/** Set when the viewer asked for another account or the web client's token was refused: don't reuse it again. */
+let skipWebLogin = false;
+
+/** Signs in with a saved login (this page's own, then the web client's) that the server still takes. */
+async function savedSignIn(): Promise<boolean> {
+  for (const login of savedLogins(store, serverId)) {
+    if (login.source === "web" && skipWebLogin) continue;
+    const conn = server!.as(login, store);
+    try {
+      signedIn(conn, await conn.userName());
+      return true;
+    } catch (e) {
+      if (!(e instanceof HttpError && (e.status === 401 || e.status === 403))) throw e;
+      if (login.source === "page") forgetPageLogin(store, serverId);
+      else skipWebLogin = true;
+    }
   }
+  return false;
 }
 
-/** The Connect button: keep the key, then open the item's pack or reconnect playback. */
-async function connect(): Promise<void> {
-  const key = keyInput().value.trim();
-  try {
-    localStorage.setItem("discmenu.apiKey", key);
-  } catch {
-    /* private window: keep it for this page only */
-  }
-  if (!itemId) {
-    usePlayback(new StubPlayback());
-    jfState("Playing through Jellyfin needs the page opened from a series or movie (?item=). Using the stub.");
-    return;
-  }
-  if (!key) {
-    needLogin("Enter an API key to load this disc's menus.");
-    return;
-  }
-  await openItem(new Jellyfin(serverRoot(), key));
+function signedIn(conn: Jellyfin, name: string): void {
+  jf = conn;
+  stopQuickConnect();
+  $("signin").hidden = true;
+  const web = conn.login?.source === "web";
+  $("jf-account").textContent = `Signed in as ${name}${web ? " (the web client's login)" : ""}.`;
+  const sw = $<HTMLButtonElement>("jf-switch");
+  sw.textContent = web ? "Use another account" : "Sign out";
+  sw.hidden = false;
 }
 
-function needLogin(why: string): void {
+/** Shows the sign-in: a Quick Connect code where the server has it on, and the user name and password form. */
+async function showSignIn(why: string): Promise<void> {
+  jf = null;
+  $("jf-account").textContent = "Not signed in.";
+  $("jf-switch").hidden = true;
+  $("signin-why").textContent = why;
+  $("signin-error").textContent = "";
+  $("signin").hidden = false;
   status(why);
-  jfState(why);
-  $<HTMLDetailsElement>("jf-panel").open = true;
-  keyInput().focus();
+  jfState("Not connected.");
+  const qc = await server!.quickConnectEnabled();
+  $("qc").hidden = !qc;
+  if (qc) void startQuickConnect();
+  else $<HTMLInputElement>("pw-user").focus();
+}
+
+let qcTimer = 0;
+let qcSecret: string | null = null;
+
+function stopQuickConnect(): void {
+  window.clearTimeout(qcTimer);
+  qcSecret = null;
+}
+
+/** Asks for a Quick Connect code, then checks every few seconds whether a signed-in device approved it. */
+async function startQuickConnect(): Promise<void> {
+  stopQuickConnect();
+  $<HTMLButtonElement>("qc-new").hidden = true;
+  $("qc-code").textContent = "...";
+  let req;
+  try {
+    req = await server!.quickConnectStart();
+  } catch (e) {
+    $("qc-code").textContent = "";
+    $("qc-note").textContent = `Couldn't start Quick Connect: ${(e as Error).message}`;
+    $<HTMLButtonElement>("qc-new").hidden = false;
+    return;
+  }
+  const secret = (qcSecret = req.Secret);
+  $("qc-code").textContent = req.Code;
+  $("qc-note").textContent = "Waiting for the code to be approved...";
+  const poll = async () => {
+    if (qcSecret !== secret) return;
+    try {
+      const st = await server!.quickConnectState(secret);
+      if (qcSecret !== secret) return;
+      if (st.Authenticated) {
+        const r = await server!.quickConnectFinish(secret);
+        await signInAs(r.token, r.userId, r.name);
+        return;
+      }
+    } catch (e) {
+      if (qcSecret !== secret) return;
+      if (e instanceof HttpError && (e.status === 404 || e.status === 401)) {
+        qcSecret = null;
+        $("qc-code").textContent = "";
+        $("qc-note").textContent =
+          e.status === 404 ? "The code has expired." : "Quick Connect was turned off on the server.";
+        $<HTMLButtonElement>("qc-new").hidden = false;
+        return;
+      }
+      // A network blip: keep waiting.
+    }
+    qcTimer = window.setTimeout(() => void poll(), 3000);
+  };
+  qcTimer = window.setTimeout(() => void poll(), 3000);
+}
+
+async function passwordSignIn(e: Event): Promise<void> {
+  e.preventDefault();
+  const user = $<HTMLInputElement>("pw-user").value.trim();
+  const pass = $<HTMLInputElement>("pw-pass");
+  const err = $("signin-error");
+  err.textContent = "";
+  if (!user) {
+    err.textContent = "Enter your user name.";
+    return;
+  }
+  try {
+    const r = await server!.signIn(user, pass.value);
+    pass.value = "";
+    await signInAs(r.token, r.userId, r.name);
+  } catch (ex) {
+    err.textContent =
+      ex instanceof HttpError && ex.status === 401 ? "Wrong user name or password." : `Couldn't sign in: ${(ex as Error).message}`;
+  }
+}
+
+/** Keeps a login the page just made, then opens the item with it (from scratch if another user had it open). */
+async function signInAs(token: string, userId: string, name: string): Promise<void> {
+  const conn = server!.as(savePageLogin(store, serverId, token, userId), store);
+  signedIn(conn, name);
+  closePack();
+  await openItem();
+}
+
+/** "Sign out" ends this page's own login; "Use another account" leaves the web client's alone and shows the sign-in. */
+async function switchAccount(): Promise<void> {
+  const conn = jf;
+  if (!conn) return;
+  stopTitle();
+  if (conn.login?.source === "page") {
+    await conn.signOut();
+    forgetPageLogin(store, serverId);
+  }
+  skipWebLogin = true;
+  await showSignIn(conn.login?.source === "page" ? "Signed out." : "Sign in with another account.");
+}
+
+/** A refused token mid-session (revoked, or signed out elsewhere): forget it and ask again. */
+async function loginRefused(): Promise<void> {
+  if (jf?.login?.source === "page") forgetPageLogin(store, serverId);
+  else skipWebLogin = true;
+  await showSignIn("Jellyfin no longer takes this login. Sign in again.");
 }
 
 /** Opens ?item='s pack (the one in &disc=, its only one, or the viewer's choice), then connects playback. */
-async function openItem(jf: Jellyfin): Promise<void> {
+async function openItem(): Promise<void> {
+  const conn = jf;
+  if (!conn) return;
   try {
     if (!discId) {
-      const discs = await jf.discs(itemId!);
+      const discs = await conn.discs(itemId!);
       if (discs.length === 0) {
         status("This series or movie has no disc menus.");
         jfState("Connected; no disc menus here.");
         return;
       }
       if (discs.length > 1) {
-        chooseDisc(jf, discs);
+        chooseDisc(discs);
         return;
       }
       discId = discs[0].Id;
     }
-    if (!pack) await loadPack(`${jf.base}${jf.discsPath(itemId!)}/${encodeURIComponent(discId)}/Files/`, jf);
-    packJf = jf; // a new key from the Connect button signs the pack's images from now on
-    await connectPlayback(jf);
+    if (!loaded) await loadPack(`${conn.base}${conn.discsPath(itemId!)}/${encodeURIComponent(discId)}/Files/`, conn);
+    await connectPlayback(conn);
   } catch (e) {
     const msg = (e as Error).message;
-    if (e instanceof HttpError && e.status === 401) needLogin("Jellyfin refused the API key. Enter another.");
-    else if (e instanceof HttpError && e.status === 404) status("This disc's menus aren't on this server, or you can't see them.");
+    if (e instanceof HttpError && e.status === 401) return loginRefused();
+    if (e instanceof HttpError && (e.status === 404 || e.status === 403))
+      status("This disc's menus aren't on this server, or this account can't see them.");
     else status(`Couldn't open the disc: ${msg}`);
     jfState(`Not connected: ${msg}`);
   }
 }
 
-function chooseDisc(jf: Jellyfin, discs: DiscInfo[]): void {
+/** Forgets the open pack, so another account opens it from scratch. */
+function closePack(): void {
+  stopTitle();
+  clearTimers();
+  running = false;
+  if (!loaded) return;
+  loaded = false;
+  menuLayer.hidden = true;
+  titleLayer.hidden = true;
+  $<HTMLButtonElement>("start").parentElement!.hidden = false;
+  $<HTMLButtonElement>("start").disabled = true;
+  playback = new StubPlayback();
+  wirePlayback(playback);
+}
+
+function chooseDisc(discs: DiscInfo[]): void {
   status("This has more than one disc. Pick one.");
   const list = $<HTMLDivElement>("discs");
   list.replaceChildren(
@@ -468,7 +609,7 @@ function chooseDisc(jf: Jellyfin, discs: DiscInfo[]): void {
         const q = new URLSearchParams(location.search);
         q.set("disc", d.Id);
         history.replaceState(null, "", `?${q}`);
-        void openItem(jf);
+        void openItem();
       });
       return b;
     }),
@@ -490,25 +631,27 @@ function usePlayback(p: Playback): void {
   stopTitle();
   playback = p;
   wirePlayback(p);
-  if (vm && !vm.stopped && vm.state.domain === "VTS") render();
+  if (running && !vm.stopped && vm.state.domain === "VTS") render();
 }
 
 // ---------------------------------------------------------------------------- start
 
 function restart(): void {
+  if (!loaded) return;
   stopTitle();
   trace.length = 0;
   vm = new DvdVm(pack, { log });
+  running = true;
   vm.start();
   render();
 }
 
-/** Loads menu.json from a pack folder (signed with jf's token when given) and warms the menu images. */
-async function loadPack(packBase: string, jf: Jellyfin | null): Promise<void> {
+/** Loads menu.json from a pack folder (signed with conn's token when given) and warms the menu images. */
+async function loadPack(packBase: string, conn: Jellyfin | null): Promise<void> {
   base = packBase;
-  packJf = jf;
-  if (jf) {
-    pack = await jf.get<Pack>(base.slice(jf.base.length) + "menu.json");
+  packJf = conn;
+  if (conn) {
+    pack = await conn.get<Pack>(base.slice(conn.base.length) + "menu.json");
   } else {
     const r = await fetch(base + "menu.json");
     if (!r.ok) throw new HttpError(r.status, `${r.status} ${r.statusText}`);
@@ -525,6 +668,7 @@ async function loadPack(packBase: string, jf: Jellyfin | null): Promise<void> {
   }
   document.title = `Disc menu: ${pack.disc.name}`;
   $("disc-name").textContent = pack.disc.name;
+  loaded = true;
   $<HTMLButtonElement>("start").disabled = false;
   status("Ready. Press Start disc.");
 }
@@ -532,9 +676,15 @@ async function loadPack(packBase: string, jf: Jellyfin | null): Promise<void> {
 async function main(): Promise<void> {
   const go = $<HTMLButtonElement>("start");
   go.disabled = true;
-  keyInput().value = storedKey();
   wirePlayback(playback);
-  $("jf-connect").addEventListener("click", () => void connect());
+  try {
+    store.removeItem("discmenu.apiKey"); // the API key earlier versions kept
+  } catch {
+    /* nothing kept */
+  }
+  $("jf-switch").addEventListener("click", () => void switchAccount());
+  $("pw-form").addEventListener("submit", (e) => void passwordSignIn(e));
+  $("qc-new").addEventListener("click", () => void startQuickConnect());
   $("btn-menu").addEventListener("click", () => menuKey("root"));
   $("btn-title").addEventListener("click", () => menuKey("title"));
   $("btn-restart").addEventListener("click", restart);
@@ -545,11 +695,20 @@ async function main(): Promise<void> {
   });
 
   if (itemId) {
-    const key = storedKey();
-    if (key) await openItem(new Jellyfin(serverRoot(), key));
-    else needLogin("This disc's menus need a Jellyfin login. For now, enter an API key under Jellyfin below.");
+    server = new Jellyfin(serverRoot(), null, store);
+    try {
+      const info = await server.publicInfo();
+      serverId = info.Id;
+      if (info.ServerName) $("server-name").textContent = info.ServerName;
+      if (await savedSignIn()) await openItem();
+      else await showSignIn("Sign in to Jellyfin to open this disc's menus.");
+    } catch (e) {
+      status(`Couldn't reach Jellyfin: ${(e as Error).message}`);
+      jfState("Not connected.");
+    }
     return;
   }
+  $("jf-account").textContent = "No sign-in for a test pack; title cells show what would play.";
   const testPack = testPackBase();
   if (!testPack) {
     status("No menu pack given: open this page from a series or movie (?item=<id>), or with ?pack=<pack folder>/.");

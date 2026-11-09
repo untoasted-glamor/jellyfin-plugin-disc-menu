@@ -45,7 +45,15 @@ the movie even when the file was renamed. Stream indexes are looked up on every 
 file shifts them.
 
 The player page opens a pack with `DiscMenu/Player/?item={itemId}`, and `&disc={disc}` when the item has more
-than one. Until the page has its own sign-in, it asks for an API key, kept in the browser's local storage.
+than one. Every call uses the viewer's own account:
+
+- In a browser the page shares the web client's origin, so it reuses the web client's saved login for the same
+  server (`jellyfin_credentials` in local storage, matched by server id). That token is sent on its own, with no
+  client or device name, so the web client's entry under Dashboard > Devices keeps its name.
+- Otherwise the page signs in itself: a Quick Connect code to approve from a signed-in device (user settings >
+  Quick Connect), when the server has Quick Connect on, or a user name and password. It keeps that login in the
+  browser's local storage and shows up under Dashboard > Devices as Disc Menu. Sign out ends it on the server.
+- "Use another account" leaves the web client signed in.
 
 A series or movie with at least one readable pack gets a "Disc menu" entry under its Links, pointing at
 `{base URL}/DiscMenu/Player/?item={itemId}`. The address starts at the server's root, so the page opens on the
