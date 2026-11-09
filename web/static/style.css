@@ -82,3 +82,7 @@ pre { margin: 8px 0; font: 12px/1.4 ui-monospace, monospace; white-space: pre-wr
 .trace { max-height: 320px; overflow: auto; }
 .discs { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
 .discs:empty { display: none; }
+
+/* Inside the Disc menu button's overlay: no debugging panel, and the page's own header stays compact. */
+.embedded #vm-panel { display: none; }
+.embedded header { padding: 8px 16px; }

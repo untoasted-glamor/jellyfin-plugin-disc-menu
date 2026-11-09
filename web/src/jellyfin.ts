@@ -273,8 +273,12 @@ export class Jellyfin {
     return `${this.base}Videos/${item.id}/master.m3u8?${q}`;
   }
 
-  stopEncoding(playSessionId: string): void {
+  /** Ends a title's transcode. keepalive: the request still goes out when the page is closing. Never rejects. */
+  stopEncoding(playSessionId: string): Promise<void> {
     const q = new URLSearchParams({ deviceId: this.deviceId, playSessionId });
-    this.call(`Videos/ActiveEncodings?${q}`, { method: "DELETE" }).catch(() => {});
+    return this.call(`Videos/ActiveEncodings?${q}`, { method: "DELETE", keepalive: true }).then(
+      () => {},
+      () => {},
+    );
   }
 }
