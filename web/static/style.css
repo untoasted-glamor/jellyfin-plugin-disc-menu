@@ -6,6 +6,7 @@
   --panel: #fff;
   --line: #d6d6d2;
   --accent: #2f6fdb;
+  --error: #b3261e;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
@@ -15,6 +16,7 @@
     --panel: #1f1f1f;
     --line: #333;
     --accent: #6ea0ff;
+    --error: #ff8a80;
   }
 }
 :root[data-theme="dark"] {
@@ -24,6 +26,7 @@
   --panel: #1f1f1f;
   --line: #333;
   --accent: #6ea0ff;
+  --error: #ff8a80;
 }
 
 * { box-sizing: border-box; }
@@ -63,6 +66,18 @@ button:hover { border-color: var(--accent); }
 .form label { display: flex; flex-direction: column; gap: 2px; font-size: 13px; color: var(--muted); flex: 1 1 220px; }
 .form input { font: inherit; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); min-width: 0; }
 .muted { color: var(--muted); }
+.error { color: var(--error); margin: 8px 0 0; min-height: 1.45em; }
+.error:empty { display: none; }
+.signin { padding: 12px 16px; }
+.signin[hidden] { display: none; }
+.signin h2 { font-size: 16px; margin: 0 0 4px; }
+.qc { border-bottom: 1px solid var(--line); padding-bottom: 12px; margin-bottom: 12px; }
+.qc[hidden] { display: none; }
+.qc-code { font: 600 32px/1.2 ui-monospace, monospace; letter-spacing: 0.15em; margin: 4px 0; }
+.qc-code:empty { display: none; }
+.account { align-items: center; }
+.account p { margin: 8px 0; }
+button[hidden] { display: none; }
 pre { margin: 8px 0; font: 12px/1.4 ui-monospace, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
 .trace { max-height: 320px; overflow: auto; }
 .discs { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
