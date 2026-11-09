@@ -1,3 +1,4 @@
+using Jellyfin.Plugin.DiscMenu.Media;
 using Jellyfin.Plugin.DiscMenu.Packs;
 using MediaBrowser.Controller;
 using MediaBrowser.Controller.Plugins;
@@ -14,5 +15,6 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
     public void RegisterServices(IServiceCollection serviceCollection, IServerApplicationHost applicationHost)
     {
         serviceCollection.AddSingleton<PackStore>();
+        serviceCollection.AddSingleton<MediaLookup>();
     }
 }

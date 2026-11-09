@@ -65,3 +65,5 @@ button:hover { border-color: var(--accent); }
 .muted { color: var(--muted); }
 pre { margin: 8px 0; font: 12px/1.4 ui-monospace, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
 .trace { max-height: 320px; overflow: auto; }
+.discs { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
+.discs:empty { display: none; }

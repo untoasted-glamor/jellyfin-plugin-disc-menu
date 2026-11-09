@@ -6,11 +6,13 @@ using System.Security.Claims;
 using System.Text;
 using Jellyfin.Database.Implementations.Entities;
 using Jellyfin.Plugin.DiscMenu.Api;
+using Jellyfin.Plugin.DiscMenu.Media;
 using Jellyfin.Plugin.DiscMenu.Packs;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.Movies;
 using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Library;
+using MediaBrowser.Model.Dto;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
@@ -28,14 +30,17 @@ public sealed class DiscMenuControllerTests : IDisposable
     private readonly TempMediaFolder _media = new();
     private readonly ILibraryManager _library = Substitute.For<ILibraryManager>();
     private readonly IUserManager _users = Substitute.For<IUserManager>();
+    private readonly IMediaSourceManager _sources = Substitute.For<IMediaSourceManager>();
     private readonly User _alice = new("alice", "auth", "reset");
     private readonly Movie _movie;
 
     public DiscMenuControllerTests()
     {
-        _media.WriteMenu("sintel", """{"disc":{"type":"dvd","name":"Sintel"}}""");
+        _media.WriteMenu("sintel", """{"disc":{"type":"dvd","name":"Sintel"},"media":{"2:1":{"cells":{"1":{"offset":0,"file":"Movie (2010).mkv"}}}}}""");
         _media.Write("Movie (2010)/.discmenus/sintel/menus/bg.png");
-        _movie = new Movie { Id = _movieId, Path = Path.Combine(_media.Item, "Movie (2010).mkv") };
+        _movie = new Movie { Id = _movieId, Name = "Movie", Path = Path.Combine(_media.Item, "Movie (2010).mkv") };
+        _sources.GetStaticMediaSources(_movie, false, Arg.Any<User>())
+            .Returns([new MediaSourceInfo { Id = "source", Path = _movie.Path, MediaStreams = [] }]);
         _users.GetUserById(_userId).Returns(_alice);
         _library.GetItemById<BaseItem>(_movieId, _alice).Returns(_movie);
         _library.GetItemById<BaseItem>(_movieId, (User?)null).Returns(_movie);
@@ -94,6 +99,7 @@ public sealed class DiscMenuControllerTests : IDisposable
         Assert.NotNull(Method(nameof(DiscMenuController.GetPlayer)).GetCustomAttribute<AllowAnonymousAttribute>());
         Assert.NotNull(Method(nameof(DiscMenuController.GetDiscs)).GetCustomAttribute<AuthorizeAttribute>());
         Assert.NotNull(Method(nameof(DiscMenuController.GetFile)).GetCustomAttribute<AuthorizeAttribute>());
+        Assert.NotNull(Method(nameof(DiscMenuController.GetMedia)).GetCustomAttribute<AuthorizeAttribute>());
         Assert.Null(typeof(DiscMenuController).GetCustomAttribute<AllowAnonymousAttribute>());
     }
 
@@ -192,6 +198,47 @@ public sealed class DiscMenuControllerTests : IDisposable
         Assert.IsType<ForbidResult>(Controller(UserPrincipal(Guid.NewGuid())).GetFile(_movieId, "sintel", "menu.json"));
     }
 
+    [Fact]
+    public void GetMedia_maps_the_packs_files_with_the_users_access()
+    {
+        var controller = Controller(UserPrincipal());
+
+        var ok = Assert.IsType<OkObjectResult>(controller.GetMedia(_movieId, "sintel").Result);
+
+        var media = Assert.IsType<DiscMedia>(ok.Value);
+        Assert.Equal("Movie", media.Name);
+        var title = Assert.Single(media.Titles);
+        Assert.Equal((_movieId, "source"), (title.ItemId, title.MediaSourceId));
+        Assert.Equal("private, no-cache", controller.Response.Headers.CacheControl.ToString());
+        _sources.Received().GetStaticMediaSources(_movie, false, _alice);
+    }
+
+    [Fact]
+    public void GetMedia_for_an_api_key_looks_up_with_no_user()
+    {
+        Assert.IsType<OkObjectResult>(Controller(ApiKeyPrincipal()).GetMedia(_movieId, "sintel").Result);
+
+        _sources.Received().GetStaticMediaSources(_movie, false, null);
+    }
+
+    [Theory]
+    [InlineData("nodisc")]
+    [InlineData("..")]
+    [InlineData("broken")]
+    public void GetMedia_404s_on_a_missing_or_unreadable_pack(string disc)
+    {
+        _media.WriteMenu("broken", "not json");
+
+        Assert.IsType<NotFoundResult>(Controller(UserPrincipal()).GetMedia(_movieId, disc).Result);
+    }
+
+    [Fact]
+    public void GetMedia_404s_on_a_hidden_item_and_forbids_an_unknown_user()
+    {
+        Assert.IsType<NotFoundResult>(Controller(UserPrincipal()).GetMedia(Guid.NewGuid(), "sintel").Result);
+        Assert.IsType<ForbidResult>(Controller(UserPrincipal(Guid.NewGuid())).GetMedia(_movieId, "sintel").Result);
+    }
+
     private static MethodInfo Method(string name) => typeof(DiscMenuController).GetMethod(name)!;
 
     private static ClaimsPrincipal UserPrincipal(Guid? userId = null)
@@ -219,7 +266,8 @@ public sealed class DiscMenuControllerTests : IDisposable
         var context = new DefaultHttpContext { User = principal };
         context.Request.Path = path;
         context.Request.QueryString = new QueryString(query);
-        return new DiscMenuController(_library, _users, new PackStore(NullLogger<PackStore>.Instance))
+        var packs = new PackStore(NullLogger<PackStore>.Instance);
+        return new DiscMenuController(_library, _users, packs, new MediaLookup(_library, _sources))
         {
             ControllerContext = new ControllerContext { HttpContext = context },
         };

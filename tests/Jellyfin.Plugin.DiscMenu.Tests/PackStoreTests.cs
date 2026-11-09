@@ -207,6 +207,69 @@ public sealed class PackStoreTests : IDisposable
         Assert.Equal(["sintel"], Ids(_store.ListDiscs(_media.Item)));
     }
 
+    [Fact]
+    public void ReadTitles_lists_a_movies_files_once_each()
+    {
+        _media.WriteMenu("film", """
+            {"disc":{"type":"dvd","name":"Film"},"media":{
+              "2:1":{"cells":{"1":{"offset":0,"file":"Film.mkv"},"2":{"offset":90.5,"file":"Film.mkv"}}},
+              "3:1":{"cells":{"1":{"offset":0,"file":"Extras.mkv"},"2":{"offset":0}}}}}
+            """);
+
+        var titles = _store.ReadTitles(_media.Item, "film");
+
+        Assert.NotNull(titles);
+        Assert.Null(titles.Season);
+        Assert.Equal([new PackTitle(null, "Extras.mkv"), new PackTitle(null, "Film.mkv")], titles.Titles);
+    }
+
+    [Fact]
+    public void ReadTitles_lists_a_series_episodes_in_number_order()
+    {
+        _media.WriteMenu("d1", """
+            {"disc":{"type":"dvd","name":"Show","season":2},"media":{
+              "1:1":{"cells":{"1":{"offset":0,"file":"b.mkv","episode":10},"2":{"offset":0,"file":"a.mkv","episode":9}}},
+              "1:2":{"cells":{"1":{"offset":12,"file":"b.mkv","episode":10},"2":{"offset":0,"file":"menu-extra.mkv"}}}}}
+            """);
+
+        var titles = _store.ReadTitles(_media.Item, "d1");
+
+        Assert.NotNull(titles);
+        Assert.Equal(2, titles.Season);
+        Assert.Equal(
+            [new PackTitle(9, "a.mkv"), new PackTitle(10, "b.mkv"), new PackTitle(null, "menu-extra.mkv")],
+            titles.Titles);
+    }
+
+    [Fact]
+    public void ReadTitles_is_empty_for_a_pack_with_no_media()
+    {
+        var titles = _store.ReadTitles(_media.Item, "sintel");
+
+        Assert.NotNull(titles);
+        Assert.Empty(titles.Titles);
+    }
+
+    [Theory]
+    [InlineData("not json")]
+    [InlineData("""{"media":{"1:1":{"cells":{"1":{"file":"a.mkv","episode":"one"}}}}}""")]
+    [InlineData("""{"media":[]}""")]
+    public void ReadTitles_is_null_for_a_menu_json_it_cant_read(string json)
+    {
+        _media.WriteMenu("broken", json);
+
+        Assert.Null(_store.ReadTitles(_media.Item, "broken"));
+    }
+
+    [Theory]
+    [InlineData("nodisc")]
+    [InlineData("..")]
+    [InlineData(".discmenus")]
+    public void ReadTitles_is_null_for_a_missing_or_unsafe_pack(string disc)
+    {
+        Assert.Null(_store.ReadTitles(_media.Item, disc));
+    }
+
     [Theory]
     [InlineData("sintel", true)]
     [InlineData("VTSM01.en.pgc10.c1.b01.selected.png", true)]

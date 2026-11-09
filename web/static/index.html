@@ -23,15 +23,16 @@
     <div class="splash">
       <p>Plays the disc's own navigation from first play. Arrows move, Enter selects, M or Esc is the
       Menu key, T the Title menu. Mouse and touch work too.</p>
+      <div id="discs" class="discs"></div>
       <button type="button" id="start">Start disc</button>
     </div>
   </div>
   <div id="status" class="status" role="status"></div>
 
-  <details class="panel">
+  <details class="panel" id="jf-panel">
     <summary>Jellyfin</summary>
-    <p>Titles stream from this Jellyfin server with an API key (Dashboard &gt; API Keys). The key stays in
-    this browser only. Without one, title cells show what would play.</p>
+    <p>Until this page has its own sign-in, it loads a disc's menus and streams its titles with an API key
+    (Dashboard &gt; API Keys). The key stays in this browser only.</p>
     <div class="form">
       <label>API key <input id="jf-key" type="password" autocomplete="off" spellcheck="false"></label>
       <button type="button" id="jf-connect">Connect</button>

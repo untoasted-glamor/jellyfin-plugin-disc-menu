@@ -35,8 +35,17 @@ The plugin serves:
 | `GET /DiscMenu/Player/` and its files | None | The player page, embedded in the DLL. |
 | `GET /DiscMenu/Items/{itemId}/Discs` | Yes, and the user must see the item | The item's packs: `Id` (folder name), `Name`, `Type` (`dvd`), and `Season` for a series. |
 | `GET /DiscMenu/Items/{itemId}/Discs/{disc}/Files/{path}` | Yes, and the user must see the item | One file of a pack, with range requests. A path that leads out of the pack, once links are followed, is refused. |
+| `GET /DiscMenu/Items/{itemId}/Discs/{disc}/Media` | Yes, and the user must see the item | Which library item plays each file the pack's titles name: `ItemId`, `MediaSourceId` and its audio and subtitle `Streams` with Jellyfin's indexes. A file the library lacks has no `ItemId`. |
 
 A login is a token in `Authorization: MediaBrowser Token="..."`, or `ApiKey=` in the URL for images and video.
+
+A series' files are found by the pack's `disc.season` and each title's episode number, because files are often
+renamed after a rip. A movie's are found by file name among its versions; a pack that plays a single file plays
+the movie even when the file was renamed. Stream indexes are looked up on every request, since an added subtitle
+file shifts them.
+
+The player page opens a pack with `DiscMenu/Player/?item={itemId}`, and `&disc={disc}` when the item has more
+than one. Until the page has its own sign-in, it asks for an API key, kept in the browser's local storage.
 
 ## Build
 
@@ -61,7 +70,7 @@ cd web
 npm ci --ignore-scripts
 npm run check    # type check
 npm test         # VM scenarios on the Sintel fixture
-npm run serve    # http://127.0.0.1:8098/dist/index.html?pack=../fixtures/sintel/ (stub playback)
+npm run serve    # http://127.0.0.1:8098/dist/index.html?pack=../fixtures/sintel/ (no login, stub playback)
 ```
 
 Test fixtures come from the Sintel DVD only (see [NOTICE](NOTICE)).

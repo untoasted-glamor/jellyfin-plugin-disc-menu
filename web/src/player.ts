@@ -2,21 +2,40 @@
 // the disc's own subpicture overlay, per-button highlight images); title cells are handed to a
 // Playback (Jellyfin or the stub). Keys: arrows move, Enter/Space activate, M or Escape = Menu,
 // T = Title menu. Mouse hover selects, click or tap activates.
+//
+// The page opens a series' or movie's pack from the plugin with ?item=<id> (and &disc=<pack>, else the item's only
+// pack or a choice), signed in with an API key until the page has its own sign-in. ?pack=<folder>/ opens a pack
+// folder on the same server with no login and stub playback, for testing the menus.
 import { ButtonJson, CellJson, DvdVm, MediaCell, MenuJson, Pack } from "./dvdvm.js";
 import {
-  fmt, Jellyfin, JellyfinPlayback, mediaKey, Playback, PlayRequest, requestKey, serverRoot, StubPlayback, subtitleLabel,
+  DiscInfo, encodePath, fmt, HttpError, Jellyfin, JellyfinPlayback, mediaItems, mediaKey, Playback, PlayRequest,
+  requestKey, serverRoot, StubPlayback, subtitleLabel,
 } from "./playback.js";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 
-/** The pack folder, from ?pack=<relative folder>/. Only this server's own addresses are accepted. */
-function packBase(): string | null {
-  const p = new URLSearchParams(location.search).get("pack");
+const params = new URLSearchParams(location.search);
+/** The series or movie whose pack plays, from ?item=. */
+const itemId = params.get("item");
+let discId = params.get("disc");
+
+/** A test pack folder, from ?pack=<relative folder>/. Only this server's own addresses are accepted. */
+function testPackBase(): string | null {
+  const p = params.get("pack");
   if (!p) return null;
   const u = new URL(p.endsWith("/") ? p : p + "/", location.href);
   return u.origin === location.origin ? u.href : null;
 }
-const base = packBase() ?? "";
+
+/** Where the pack's files are, and the connection that signs requests for them (none for a test pack). */
+let base = "";
+let packJf: Jellyfin | null = null;
+
+/** A pack file's URL for an img, video or audio element. */
+function packUrl(file: string): string {
+  const url = base + encodePath(file);
+  return packJf ? packJf.withKey(url) : url;
+}
 
 let pack: Pack;
 let vm: DvdVm;
@@ -149,7 +168,7 @@ function drawMenu(cell: CellJson): void {
     const bg = menu.background;
     if (bg?.video) {
       const v = document.createElement("video");
-      v.src = base + bg.video;
+      v.src = packUrl(bg.video);
       v.className = "layer";
       v.playsInline = true;
       v.autoplay = true;
@@ -157,19 +176,19 @@ function drawMenu(cell: CellJson): void {
       menuLayer.append(v);
     } else if (bg?.image) {
       const i = document.createElement("img");
-      i.src = base + bg.image;
+      i.src = packUrl(bg.image);
       i.className = "layer";
       i.alt = "";
       menuLayer.append(i);
     }
     if (bg?.audio) {
-      bgAudio = new Audio(base + bg.audio);
+      bgAudio = new Audio(packUrl(bg.audio));
       bgAudio.addEventListener("ended", () => afterCell(cell));
       bgAudio.play().catch(() => status("Click the page once to allow menu audio."));
     }
     if (menu.overlay) {
       const o = document.createElement("img");
-      o.src = base + menu.overlay;
+      o.src = packUrl(menu.overlay);
       o.className = "layer";
       o.alt = "";
       menuLayer.append(o);
@@ -187,7 +206,7 @@ function drawMenu(cell: CellJson): void {
       for (const st of ["selected", "activated"] as const) {
         if (b[st]) {
           const i = document.createElement("img");
-          i.src = base + b[st]!;
+          i.src = packUrl(b[st]!);
           i.className = st;
           i.alt = "";
           d.append(i);
@@ -367,35 +386,104 @@ function wirePlayback(p: Playback): void {
   };
 }
 
-// ---------------------------------------------------------------------------- Jellyfin settings
+// ---------------------------------------------------------------------------- Jellyfin
 
+const keyInput = () => $<HTMLInputElement>("jf-key");
+const jfState = (s: string) => ($<HTMLSpanElement>("jf-state").textContent = s);
+
+function storedKey(): string {
+  try {
+    return localStorage.getItem("discmenu.apiKey") ?? "";
+  } catch {
+    return "";
+  }
+}
+
+/** The Connect button: keep the key, then open the item's pack or reconnect playback. */
 async function connect(): Promise<void> {
-  const key = $<HTMLInputElement>("jf-key").value.trim();
-  const out = $<HTMLSpanElement>("jf-state");
+  const key = keyInput().value.trim();
   try {
     localStorage.setItem("discmenu.apiKey", key);
   } catch {
     /* private window: keep it for this page only */
   }
-  if (!key) {
+  if (!itemId) {
     usePlayback(new StubPlayback());
-    out.textContent = "Not connected: title cells show what would play.";
+    jfState("Playing through Jellyfin needs the page opened from a series or movie (?item=). Using the stub.");
     return;
   }
-  out.textContent = "Connecting...";
-  try {
-    if (pack.disc.season === undefined) throw new Error("playing a movie through Jellyfin isn't supported yet");
-    const jf = new Jellyfin(serverRoot(), key);
-    const { title, items } = await jf.resolveSeries(pack.disc.name, pack.disc.season);
-    const wanted = new Map(Object.values(pack.media).flatMap((m) => Object.values(m.cells).map((c) => [mediaKey(c), c])));
-    const missing = [...wanted].filter(([k]) => !items.has(k)).map(([, c]) => mediaTitle(c));
-    usePlayback(new JellyfinPlayback(jf, items));
-    out.textContent = `Connected: ${title}, ${wanted.size - missing.length} of ${wanted.size} files found` +
-      (missing.length ? ` (missing ${missing.join(", ")})` : "");
-  } catch (e) {
-    usePlayback(new StubPlayback());
-    out.textContent = `Couldn't connect: ${(e as Error).message}. Using the stub.`;
+  if (!key) {
+    needLogin("Enter an API key to load this disc's menus.");
+    return;
   }
+  await openItem(new Jellyfin(serverRoot(), key));
+}
+
+function needLogin(why: string): void {
+  status(why);
+  jfState(why);
+  $<HTMLDetailsElement>("jf-panel").open = true;
+  keyInput().focus();
+}
+
+/** Opens ?item='s pack (the one in &disc=, its only one, or the viewer's choice), then connects playback. */
+async function openItem(jf: Jellyfin): Promise<void> {
+  try {
+    if (!discId) {
+      const discs = await jf.discs(itemId!);
+      if (discs.length === 0) {
+        status("This series or movie has no disc menus.");
+        jfState("Connected; no disc menus here.");
+        return;
+      }
+      if (discs.length > 1) {
+        chooseDisc(jf, discs);
+        return;
+      }
+      discId = discs[0].Id;
+    }
+    if (!pack) await loadPack(`${jf.base}${jf.discsPath(itemId!)}/${encodeURIComponent(discId)}/Files/`, jf);
+    packJf = jf; // a new key from the Connect button signs the pack's images from now on
+    await connectPlayback(jf);
+  } catch (e) {
+    const msg = (e as Error).message;
+    if (e instanceof HttpError && e.status === 401) needLogin("Jellyfin refused the API key. Enter another.");
+    else if (e instanceof HttpError && e.status === 404) status("This disc's menus aren't on this server, or you can't see them.");
+    else status(`Couldn't open the disc: ${msg}`);
+    jfState(`Not connected: ${msg}`);
+  }
+}
+
+function chooseDisc(jf: Jellyfin, discs: DiscInfo[]): void {
+  status("This has more than one disc. Pick one.");
+  const list = $<HTMLDivElement>("discs");
+  list.replaceChildren(
+    ...discs.map((d) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = d.Season === undefined ? d.Name : `${d.Name} (season ${d.Season})`;
+      b.addEventListener("click", () => {
+        discId = d.Id;
+        list.replaceChildren();
+        const q = new URLSearchParams(location.search);
+        q.set("disc", d.Id);
+        history.replaceState(null, "", `?${q}`);
+        void openItem(jf);
+      });
+      return b;
+    }),
+  );
+}
+
+/** Asks the plugin which library item plays each of the pack's files, then plays titles through Jellyfin. */
+async function connectPlayback(jf: Jellyfin): Promise<void> {
+  jfState("Connecting...");
+  const media = await jf.media(itemId!, discId!);
+  const missing = media.Titles.filter((t) => !t.ItemId).map((t) => mediaTitle({ offset: 0, file: t.File, episode: t.Episode }));
+  usePlayback(new JellyfinPlayback(jf, mediaItems(media)));
+  const n = media.Titles.length;
+  jfState(`Connected: ${media.Name}, ${n - missing.length} of ${n} files found` +
+    (missing.length ? ` (missing ${missing.join(", ")})` : ""));
 }
 
 function usePlayback(p: Playback): void {
@@ -415,47 +503,63 @@ function restart(): void {
   render();
 }
 
-async function main(): Promise<void> {
-  if (!base) {
-    status("No menu pack given: open this page with ?pack=<pack folder>/ on this server.");
-    $<HTMLButtonElement>("start").disabled = true;
-    return;
+/** Loads menu.json from a pack folder (signed with jf's token when given) and warms the menu images. */
+async function loadPack(packBase: string, jf: Jellyfin | null): Promise<void> {
+  base = packBase;
+  packJf = jf;
+  if (jf) {
+    pack = await jf.get<Pack>(base.slice(jf.base.length) + "menu.json");
+  } else {
+    const r = await fetch(base + "menu.json");
+    if (!r.ok) throw new HttpError(r.status, `${r.status} ${r.statusText}`);
+    pack = (await r.json()) as Pack;
   }
-  const r = await fetch(base + "menu.json");
-  if (!r.ok) {
-    status(`Couldn't load the menu pack: ${r.status} ${r.statusText}`);
-    $<HTMLButtonElement>("start").disabled = true;
-    return;
-  }
-  pack = (await r.json()) as Pack;
   // Warm the cache with every menu image so a menu never paints half-loaded.
   const menus = [pack.vmg.menus, ...Object.values(pack.vts).map((v) => v.menus)].flatMap((m) => Object.values(m).flat());
   for (const cell of menus.flatMap((p) => p.cells)) {
     const m = cell.menu;
     if (!m) continue;
     for (const f of [m.background?.image, m.overlay, ...m.buttons.flatMap((b) => [b.selected, b.activated])]) {
-      if (f) new Image().src = base + f;
+      if (f) new Image().src = packUrl(f);
     }
   }
   document.title = `Disc menu: ${pack.disc.name}`;
   $("disc-name").textContent = pack.disc.name;
-  try {
-    $<HTMLInputElement>("jf-key").value = localStorage.getItem("discmenu.apiKey") ?? "";
-  } catch {
-    /* no storage */
-  }
+  $<HTMLButtonElement>("start").disabled = false;
+  status("Ready. Press Start disc.");
+}
+
+async function main(): Promise<void> {
+  const go = $<HTMLButtonElement>("start");
+  go.disabled = true;
+  keyInput().value = storedKey();
   wirePlayback(playback);
   $("jf-connect").addEventListener("click", () => void connect());
   $("btn-menu").addEventListener("click", () => menuKey("root"));
   $("btn-title").addEventListener("click", () => menuKey("title"));
   $("btn-restart").addEventListener("click", restart);
   document.addEventListener("keydown", onKey);
-  const go = $<HTMLButtonElement>("start");
   go.addEventListener("click", () => {
     go.parentElement!.hidden = true;
     restart();
   });
-  if ($<HTMLInputElement>("jf-key").value) await connect();
+
+  if (itemId) {
+    const key = storedKey();
+    if (key) await openItem(new Jellyfin(serverRoot(), key));
+    else needLogin("This disc's menus need a Jellyfin login. For now, enter an API key under Jellyfin below.");
+    return;
+  }
+  const testPack = testPackBase();
+  if (!testPack) {
+    status("No menu pack given: open this page from a series or movie (?item=<id>), or with ?pack=<pack folder>/.");
+    return;
+  }
+  try {
+    await loadPack(testPack, null);
+  } catch (e) {
+    status(`Couldn't load the menu pack: ${(e as Error).message}`);
+  }
 }
 
 void main();
