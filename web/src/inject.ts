@@ -2,24 +2,27 @@
 // client once a user is signed in, and the loader adds this script (DiscMenu/Inject/button.js, served by the plugin).
 // On a series' or movie's details page, when the item has a menu pack, it puts a "Disc menu" button next to Play.
 // The button opens the player page over the web client, full screen, in an iframe on the same origin, so the player
-// reuses the web client's login. Closing the overlay stops the playing title first (see embed.ts).
+// reuses the web client's login. When the disc starts a title, the overlay closes and the web client's own player
+// plays it, through a Play command the server sends to this web client's own session (Handoff, below).
 //
 // This runs inside the web client with the signed-in user's token, so it never turns data into markup: elements are
 // built with createElement, textContent and setAttribute only (test/safety.test.ts fails on the alternatives), the
 // item id must look like a Jellyfin id, and every address is built with URL and must stay on this origin.
-import { CLOSE, CLOSE_REQUEST, CLOSED, embedMessage, isBackKey } from "./embed.js";
+import { CLOSE_REQUEST, embedMessage, isBackKey, ITEM_ID, PLAY, PlayHandoff } from "./embed.js";
 
 export const BUTTON_CLASS = "btnDiscMenu";
 export const OVERLAY_ID = "discMenuOverlay";
 /** How long a details page's "has packs" answer is kept. */
 const CACHE_MS = 60_000;
-/** How long Close waits for the player to stop its title before it removes the iframe anyway. */
-const CLOSE_WAIT_MS = 2000;
 
 /** The web client's API client: only the parts the button uses. */
 export interface ApiClientLike {
   accessToken(): string | null | undefined;
   serverId(): string | null | undefined;
+  /** The web client's session is found by these three (the server keys sessions by client, device and user). */
+  deviceId(): string | null | undefined;
+  appName(): string | null | undefined;
+  getCurrentUserId(): string | null | undefined;
 }
 
 /** The server root (with any base URL) from this script's own address, .../DiscMenu/Inject/button.js. */
@@ -32,8 +35,6 @@ export function serverRootFrom(scriptSrc: string, origin: string): string | null
   }
   return u.origin === origin ? u.href : null;
 }
-
-const ITEM_ID = /^[0-9a-f]{32}$|^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** The item id of a details page (#/details?id=...), or null for any other page or an id that isn't one. */
 export function detailsItemId(hash: string): string | null {
@@ -51,6 +52,23 @@ export function playerUrl(root: string, itemId: string): string {
 }
 
 const authHeader = (token: string) => ({ Authorization: `MediaBrowser Token="${token}"` });
+
+/**
+ * The web client's ApiClient keeps its app name and device id URI-encoded (it encodes them for its Authorization header
+ * and decodes them for its SDK); the server stores them decoded.
+ */
+function decoded(v: string | null | undefined): string {
+  if (!v) return "";
+  try {
+    return decodeURIComponent(v);
+  } catch {
+    return v;
+  }
+}
+
+/** Ids compared the way the server writes them: no dashes, any case. */
+const sameId = (a: unknown, b: unknown) =>
+  typeof a === "string" && typeof b === "string" && a.replace(/-/g, "").toLowerCase() === b.replace(/-/g, "").toLowerCase();
 
 export class DiscMenuButton {
   private readonly cache = new Map<string, { at: number; has: Promise<boolean> }>();
@@ -168,10 +186,26 @@ export class DiscMenuButton {
     return this.sameServer;
   }
 
-  /** Opens the player over the page. */
+  /** Opens the player over the page, full screen. Runs in the button's click, which full screen needs. */
   open(id: string, opener: HTMLElement): void {
     if (this.overlay) return;
-    this.overlay = new Overlay(this.win, playerUrl(this.root, id), opener, () => (this.overlay = null));
+    const screen = new FullScreen(this.win);
+    screen.enter();
+    this.overlay = new Overlay(this.win, playerUrl(this.root, id), opener, screen, {
+      closed: () => (this.overlay = null),
+      play: (h, overlay) => void this.handOff(h, overlay, screen),
+    });
+  }
+
+  /** The player handed a title over: the overlay goes, then the web client's player plays it (see Handoff). */
+  private async handOff(h: PlayHandoff, overlay: Overlay, screen: FullScreen): Promise<void> {
+    const hash = this.win.location.hash;
+    await overlay.leave();
+    const api = this.api();
+    const result = api ? await new Handoff(this.win, this.root, api, this.fetcher).run(h, hash) : "fallback";
+    // Playing, or the web client went on to its player by itself: full screen stays for the episode.
+    if (result === "playing" || (result === "moved" && /^#!?\/video\b/.test(this.win.location.hash))) screen.exitAfterVideo();
+    else screen.exit();
   }
 
   /** The open overlay, if any (for tests). */
@@ -180,18 +214,121 @@ export class DiscMenuButton {
   }
 }
 
-/** The full-screen overlay: a bar with Close, and the player page in an iframe. */
+/** What the web client's NativeShell offers (the Android app); a browser has none. */
+interface NativeShellLike {
+  enableFullscreen?(): void;
+  disableFullscreen?(): void;
+}
+
+/** The parts of ScreenOrientation the overlay uses; lock() isn't in every browser or in TypeScript's DOM types. */
+interface OrientationLike {
+  lock?(o: string): Promise<void>;
+  unlock?(): void;
+}
+
+/**
+ * Full screen for the menu, the way the web client's episode player has it. The Android app goes full screen and
+ * landscape through NativeShell (its WebView can't do requestFullscreen); a browser goes full screen on the whole
+ * document, so the episode player that follows a hand-off stays full screen, and turns landscape where it may.
+ * exit() undoes only what enter() did.
+ */
+export class FullScreen {
+  private native = false;
+  private doc = false;
+  private locked = false;
+  private watching: (() => void) | null = null;
+
+  constructor(private readonly win: Window) {}
+
+  private get shell(): NativeShellLike | undefined {
+    return (this.win as unknown as { NativeShell?: NativeShellLike }).NativeShell;
+  }
+
+  /** In the button's click: full screen needs the viewer's gesture. Failures are ignored. */
+  enter(): void {
+    const shell = this.shell;
+    if (shell?.enableFullscreen) {
+      try {
+        shell.enableFullscreen();
+        this.native = true;
+      } catch {
+        /* the app refused; the overlay still covers the page */
+      }
+      return;
+    }
+    const doc = this.win.document;
+    if (doc.fullscreenElement || !doc.documentElement.requestFullscreen) return;
+    let asked: Promise<void>;
+    try {
+      asked = doc.documentElement.requestFullscreen();
+    } catch {
+      return;
+    }
+    void Promise.resolve(asked)
+      .then(() => {
+        this.doc = true;
+        const o = this.win.screen?.orientation as OrientationLike | undefined;
+        return o?.lock?.("landscape").then(() => {
+          this.locked = true;
+        });
+      })
+      .catch(() => {});
+  }
+
+  exit(): void {
+    this.watching?.();
+    if (this.native) this.shell?.disableFullscreen?.();
+    if (this.locked) (this.win.screen?.orientation as OrientationLike | undefined)?.unlock?.();
+    const doc = this.win.document;
+    if (this.doc && doc.fullscreenElement && doc.exitFullscreen) void doc.exitFullscreen().catch(() => {});
+    this.native = this.doc = this.locked = false;
+  }
+
+  /**
+   * After a hand-off in a browser: stays full screen while the web client's player plays (#/video), and leaves it
+   * once the web client goes back to another page. In the app, the native player resets full screen itself.
+   */
+  exitAfterVideo(maxMs = 6 * 3600_000): void {
+    if (this.native) {
+      this.native = false;
+      return;
+    }
+    if (!this.doc && !this.locked) return;
+    let sawVideo = false;
+    const onHash = () => {
+      if (/^#!?\/video\b/.test(this.win.location.hash)) sawVideo = true;
+      else if (sawVideo) this.exit();
+    };
+    const timer = this.win.setTimeout(() => this.exit(), maxMs);
+    this.win.addEventListener("hashchange", onHash);
+    this.watching = () => {
+      this.watching = null;
+      this.win.clearTimeout(timer);
+      this.win.removeEventListener("hashchange", onHash);
+    };
+    onHash();
+  }
+}
+
+/** The overlay's links to the button: it closed, or the player handed a title over. */
+interface OverlayEvents {
+  closed(): void;
+  play(h: PlayHandoff, overlay: Overlay): void;
+}
+
+/** The full-screen overlay: the player page in an iframe. The player has its own control bar (Close among them). */
 export class Overlay {
   readonly el: HTMLDivElement;
   readonly frame: HTMLIFrameElement;
-  private closing: Promise<void> | null = null;
+  private leaving: Promise<void> | null = null;
   private readonly overflow: string;
   private readonly onMessage = (e: MessageEvent) => {
-    const type = embedMessage(e, this.frame.contentWindow, this.win.location.origin);
-    if (type === CLOSE_REQUEST) void this.close();
-    else if (type === CLOSED) this.stopped?.();
+    const m = embedMessage(e, this.frame.contentWindow, this.win.location.origin);
+    if (m?.type === CLOSE_REQUEST) void this.close();
+    else if (m?.type === PLAY && !this.leaving) this.events.play(m.play, this);
   };
   private readonly onKey = (e: KeyboardEvent) => {
+    // Keys reach the overlay itself only before the frame has the focus.
     if (e.key === "Escape" || isBackKey(e)) {
       e.preventDefault();
       e.stopPropagation();
@@ -200,13 +337,13 @@ export class Overlay {
   };
   // Back (the browser's, or Android's back gesture) and any navigation close the overlay.
   private readonly onHistory = () => void this.close(true);
-  private stopped: (() => void) | null = null;
 
   constructor(
     private readonly win: Window,
     src: string,
     private readonly opener: HTMLElement,
-    private readonly onClosed: () => void,
+    private readonly screen: FullScreen,
+    private readonly events: OverlayEvents,
   ) {
     const doc = win.document;
     this.el = doc.createElement("div");
@@ -214,35 +351,19 @@ export class Overlay {
     this.el.setAttribute("role", "dialog");
     this.el.setAttribute("aria-modal", "true");
     this.el.setAttribute("aria-label", "Disc menu");
-    Object.assign(this.el.style, {
-      position: "fixed", inset: "0", zIndex: "100000", background: "#000", display: "flex", flexDirection: "column",
-    });
-
-    const bar = doc.createElement("div");
-    Object.assign(bar.style, { display: "flex", justifyContent: "flex-end", padding: "4px 8px", flex: "none" });
-    const close = doc.createElement("button");
-    close.type = "button";
-    close.className = "button-flat paper-icon-button-light discMenuClose";
-    close.title = "Close";
-    close.setAttribute("aria-label", "Close disc menu");
-    const icon = doc.createElement("span");
-    icon.className = "material-icons close";
-    icon.setAttribute("aria-hidden", "true");
-    close.append(icon);
-    close.addEventListener("click", () => void this.close());
-    bar.append(close);
+    Object.assign(this.el.style, { position: "fixed", inset: "0", zIndex: "100000", background: "#000" });
 
     this.frame = doc.createElement("iframe");
     this.frame.title = "Disc menu player";
     this.frame.setAttribute("allow", "autoplay; fullscreen");
-    Object.assign(this.frame.style, { flex: "1", width: "100%", border: "0", background: "#000" });
+    Object.assign(this.frame.style, { width: "100%", height: "100%", border: "0", background: "#000" });
     this.frame.src = src;
     this.frame.addEventListener("load", () => {
       this.frame.focus();
       this.frame.contentWindow?.focus();
     });
 
-    this.el.append(bar, this.frame);
+    this.el.append(this.frame);
     this.el.addEventListener("keydown", this.onKey);
     win.addEventListener("message", this.onMessage);
     this.overflow = doc.documentElement.style.overflow;
@@ -254,31 +375,154 @@ export class Overlay {
     win.addEventListener("hashchange", this.onHistory);
   }
 
+  /** Closes the menu with no title handed over: leaves full screen too. */
+  async close(fromHistory = false): Promise<void> {
+    const first = !this.leaving;
+    await this.leave(fromHistory);
+    if (first) {
+      this.screen.exit();
+      if (this.opener.isConnected) this.opener.focus();
+    }
+  }
+
   /**
-   * Asks the player to stop its title (and its transcode), waits for the answer or a timeout, then removes the
-   * overlay. `fromHistory` when Back or a navigation closed it, so our history entry is already gone.
+   * Removes the overlay and goes back past its history entry, waiting until that is done, so that what comes next
+   * (the web client's player for a hand-off) isn't undone by our Back. `fromHistory` when Back or a navigation closed
+   * it, so our entry is already gone. Stays full screen.
    */
-  close(fromHistory = false): Promise<void> {
-    this.closing ??= (async () => {
+  leave(fromHistory = false, waitMs = 1000): Promise<void> {
+    this.leaving ??= (async () => {
       this.win.removeEventListener("popstate", this.onHistory);
       this.win.removeEventListener("hashchange", this.onHistory);
-      const answered = new Promise<void>((resolve) => {
-        this.stopped = resolve;
-        this.win.setTimeout(resolve, CLOSE_WAIT_MS);
-      });
-      try {
-        this.frame.contentWindow?.postMessage({ type: CLOSE }, this.win.location.origin);
-      } catch {
-        this.stopped?.();
-      }
-      await answered;
       this.win.removeEventListener("message", this.onMessage);
+      // Removing the frame unloads the player page, which stops the menu's video and audio.
       this.el.remove();
       this.win.document.documentElement.style.overflow = this.overflow;
-      if (!fromHistory && (this.win.history.state as { discMenu?: boolean } | null)?.discMenu) this.win.history.back();
-      this.onClosed();
-      if (this.opener.isConnected) this.opener.focus();
+      if (!fromHistory && (this.win.history.state as { discMenu?: boolean } | null)?.discMenu) {
+        await new Promise<void>((resolve) => {
+          const done = () => {
+            this.win.removeEventListener("popstate", done);
+            this.win.clearTimeout(timer);
+            // One more task, so the web client's own popstate handling runs first.
+            this.win.setTimeout(resolve, 0);
+          };
+          const timer = this.win.setTimeout(done, waitMs);
+          this.win.addEventListener("popstate", done);
+          this.win.history.back();
+        });
+      }
+      this.events.closed();
     })();
-    return this.closing;
+    return this.leaving;
+  }
+}
+
+/** A session as GET Sessions lists it: only the fields the hand-off reads. */
+interface SessionLike {
+  Id?: string;
+  DeviceId?: string;
+  Client?: string;
+  UserId?: string;
+  NowPlayingItem?: { Id?: string } | null;
+}
+
+export type HandoffResult = "playing" | "fallback" | "moved";
+
+/**
+ * Has the web client play a title the menu picked: a Play command (POST Sessions/{id}/Playing) to the web client's
+ * own session, the same message a remote control sends. A page script can't start the web client's player itself.
+ *
+ * The server answers 204 even when the session has no live connection, so the hand-off counts only once the session
+ * reports something new playing. When that doesn't happen, the title's details page opens instead, with its own Play
+ * button, unless the web client has moved on by itself (its player may just be slow to start: opening another page
+ * would stop it).
+ */
+export class Handoff {
+  constructor(
+    private readonly win: Window,
+    private readonly root: string,
+    private readonly api: ApiClientLike,
+    private readonly fetcher: typeof fetch = (...a) => win.fetch(...a),
+    private readonly timing = { pollMs: 1000, confirmMs: 15_000 },
+    private readonly log: (s: string) => void = (s) => console.info(`[Disc menu] ${s}`),
+  ) {}
+
+  /** `hash` is the web client's address when the hand-off began (the item's details page). */
+  async run(h: PlayHandoff, hash: string): Promise<HandoffResult> {
+    const token = this.api.accessToken();
+    let session: SessionLike | null = null;
+    try {
+      session = token ? await this.ownSession(token) : null;
+      if (!session?.Id) {
+        this.log(`no session of this web client found for ${h.name}`);
+        return this.fallback(h, hash, token, null);
+      }
+      const before = session.NowPlayingItem?.Id ?? null;
+      const q = new URLSearchParams({ playCommand: "PlayNow", itemIds: h.itemId });
+      if (h.startTicks !== undefined) q.set("startPositionTicks", String(h.startTicks));
+      if (h.mediaSourceId !== undefined) q.set("mediaSourceId", h.mediaSourceId);
+      if (h.audioIndex !== undefined) q.set("audioStreamIndex", String(h.audioIndex));
+      if (h.subtitleIndex !== undefined) q.set("subtitleStreamIndex", String(h.subtitleIndex));
+      const url = new URL(`Sessions/${encodeURIComponent(session.Id)}/Playing?${q}`, this.root);
+      const r = await this.fetcher(url.href, { method: "POST", headers: authHeader(token!) });
+      this.log(`Play ${h.name} (${q}) to session ${session.Id}: ${r.status}`);
+      if (!r.ok) return this.fallback(h, hash, token, session.Id);
+      if (await this.confirm(token!, session.Id, h.itemId, before)) {
+        this.log(`${h.name} is playing`);
+        return "playing";
+      }
+      return this.fallback(h, hash, token, session.Id);
+    } catch (e) {
+      this.log(`hand-off failed: ${(e as Error).message}`);
+      return this.fallback(h, hash, token, session?.Id ?? null);
+    }
+  }
+
+  private async sessions(token: string): Promise<SessionLike[]> {
+    const q = new URLSearchParams({ deviceId: decoded(this.api.deviceId()) });
+    const r = await this.fetcher(new URL(`Sessions?${q}`, this.root).href, { headers: authHeader(token) });
+    if (!r.ok) throw new Error(`Sessions: ${r.status}`);
+    const list = (await r.json()) as unknown;
+    return Array.isArray(list) ? (list as SessionLike[]) : [];
+  }
+
+  /** This web client's session: same device, client and user. */
+  private async ownSession(token: string): Promise<SessionLike | null> {
+    const device = decoded(this.api.deviceId());
+    const app = decoded(this.api.appName());
+    if (!device) return null;
+    const list = await this.sessions(token);
+    return (
+      list.find(
+        (s) =>
+          typeof s.DeviceId === "string" && s.DeviceId.toLowerCase() === device.toLowerCase() && s.Client === app &&
+          sameId(s.UserId, this.api.getCurrentUserId()),
+      ) ?? null
+    );
+  }
+
+  /** Whether the session starts playing the title, or anything new, within the time allowed. */
+  private async confirm(token: string, sessionId: string, itemId: string, before: string | null): Promise<boolean> {
+    const end = Date.now() + this.timing.confirmMs;
+    for (;;) {
+      const s = (await this.sessions(token).catch(() => [])).find((x) => x.Id === sessionId);
+      const now = s?.NowPlayingItem?.Id ?? null;
+      if (now && (sameId(now, itemId) || !sameId(now, before))) return true;
+      if (Date.now() >= end) return false;
+      await new Promise((r) => this.win.setTimeout(r, this.timing.pollMs));
+    }
+  }
+
+  /** Opens the title's details page, unless the web client has moved on or the session plays something after all. */
+  private async fallback(h: PlayHandoff, hash: string, token: string | null | undefined, sessionId: string | null): Promise<HandoffResult> {
+    if (this.win.location.hash !== hash) return "moved";
+    if (token && sessionId) {
+      const s = (await this.sessions(token).catch(() => [])).find((x) => x.Id === sessionId);
+      if (s?.NowPlayingItem?.Id) return "moved";
+      if (this.win.location.hash !== hash) return "moved";
+    }
+    this.log(`opening the details page of ${h.name}`);
+    this.win.location.hash = `#/details?id=${encodeURIComponent(h.itemId)}`;
+    return "fallback";
   }
 }

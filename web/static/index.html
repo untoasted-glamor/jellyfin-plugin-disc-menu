@@ -38,12 +38,20 @@
   <div id="stage" class="stage">
     <div id="menu" class="menu" hidden></div>
     <div id="title" class="title" hidden></div>
+    <button type="button" id="unblock" class="unblock" hidden>Start</button>
     <div class="splash">
-      <p>Plays the disc's own navigation from first play. Arrows move, Enter selects, M or Esc is the
-      Menu key, T the Title menu. Mouse and touch work too.</p>
+      <p class="splash-help">Plays the disc's own navigation from first play. Arrows move, Enter selects, M or Esc
+      is the Menu key, T the Title menu. Mouse and touch work too.</p>
+      <p id="splash-note" class="splash-note"></p>
       <div id="discs" class="discs"></div>
       <button type="button" id="start">Start disc</button>
     </div>
+  </div>
+  <div id="bar" class="bar" role="toolbar" aria-label="Disc menu controls" hidden>
+    <button type="button" id="bar-close">Close</button>
+    <button type="button" id="bar-menu" title="M">Menu</button>
+    <button type="button" id="bar-title" title="T">Title menu</button>
+    <button type="button" id="bar-stats" hidden>Stats</button>
   </div>
   <div id="status" class="status" role="status"></div>
 
