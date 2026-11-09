@@ -3,10 +3,9 @@
 A Jellyfin plugin that plays a DVD's or Blu-ray's own title screen and menus, next to the episodes they start.
 
 **Status:** v0.3 plays a DVD's menus in the web client. A series or movie with a menu pack gets a "Disc menu"
-button next to Play (with the [JavaScript Injector](#disc-menu-button) plugin) and a "Disc menu" link; the player
-signs in as the viewer, runs the disc's own menus and plays the titles they start from the library, with
-the audio and subtitles chosen in the menus. Blu-ray menus and a phone as the remote for a TV come in later
-releases. Nothing in this repo makes packs yet; see [Menu packs](#menu-packs) for what one holds.
+button next to Play (it needs the [JavaScript Injector](#disc-menu-button) plugin); the player signs in as the
+viewer, runs the disc's own menus and plays the titles they start from the library, with the audio and subtitles
+chosen in the menus. Blu-ray menus and a phone as the remote for a TV come in later releases. Nothing in this repo makes packs yet; see [Menu packs](#menu-packs) for what one holds.
 
 Requires Jellyfin 12.0 or later.
 
@@ -59,26 +58,20 @@ than one. Every call uses the viewer's own account:
   browser's local storage and shows up under Dashboard > Devices as Disc Menu. Sign out ends it on the server.
 - "Use another account" leaves the web client signed in.
 
-A series or movie with at least one readable pack gets a "Disc menu" entry under its Links, pointing at
-`{base URL}/DiscMenu/Player/?item={itemId}`. The address starts at the server's root, so the page opens on the
-web client's own origin. Whether a folder has packs is cached for a minute, so a pack added or removed shows in
-the Links within a minute.
-
 ## Disc menu button
 
-With the [JavaScript Injector](https://github.com/n00bcodr/Jellyfin-JavaScript-Injector) plugin installed (from its
-own Catalog repository, `https://raw.githubusercontent.com/n00bcodr/jellyfin-plugins/main/manifest.json`), a series or
-movie with a readable pack also gets a "Disc menu" button next to Play in the web client. Nothing to set up: at every
-start Disc Menu registers a small loader with Injector (it shows on Injector's settings page as "Disc menu button",
-from Disc Menu), and uninstalling Disc Menu removes it again. Without Injector there is no button; the Links entry
-works either way. Injector's own Enabled switch for the button is set back on at the next start; to hide the button,
-uninstall Injector.
+A series or movie with a readable pack gets a "Disc menu" button next to Play in the web client. It is the only way
+into a disc's menus, and it needs the [JavaScript Injector](https://github.com/n00bcodr/Jellyfin-JavaScript-Injector)
+plugin, installed from its own Catalog repository
+(`https://raw.githubusercontent.com/n00bcodr/jellyfin-plugins/main/manifest.json`). Nothing to set up: at every start
+Disc Menu registers a small loader with Injector (it shows on Injector's settings page as "Disc menu button", from
+Disc Menu), and uninstalling Disc Menu removes it again. Without Injector there is no button. Injector's own Enabled
+switch for the button is set back on at the next start; to hide the button, uninstall Injector.
 
 - The loader runs once someone is signed in and adds `DiscMenu/Inject/button.js` from the web client's own server
   root, so it works under a base URL. The button script comes from the plugin's DLL, never from another site.
 - The button opens the player full screen over the web client, in a frame on the same origin, so it reuses the web
-  client's login. That is also the way into the player from the Android app, which shows the web client but doesn't
-  open its Links in it.
+  client's login. That also works in the Android app, which shows the web client.
 - Close (or Back, Escape on the bar, or a remote's Back key in the player) stops the playing title and its transcode,
   then removes the overlay; Back doesn't leave the item's page.
 - The button script runs with the viewer's login inside the web client, so it builds every element with
@@ -88,7 +81,7 @@ uninstall Injector.
   markup or code.
 
 Apps that don't show the web client (Android TV, Swiftfin and other native apps) run no injected scripts, so they get
-neither the button nor, usually, the link.
+no button.
 
 ## Build
 
