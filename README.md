@@ -90,6 +90,24 @@ switch for the button is set back on at the next start; to hide the button, unin
   playback starts within 15 seconds, the title's details page opens instead, with its own Play button.
 - Titles the disc starts before the viewer pressed any menu button (logos and warnings at first play) are skipped,
   so the disc gets to its menu.
+- **Stats** (the bar's Stats button, or `D` on a keyboard) opens a panel over the top left of the menu. It shows the live
+  state: the disc and pack, where the disc's navigation is (domain, title set, PGC and cell), its title, chapter,
+  audio, subpicture, button and general registers, the menu's buttons and media, the sign-in, and the plugin's and
+  server's versions. Below that is the log, with the time and seconds since the disc started:
+  - **Info:** the menus shown and the buttons pressed.
+  - **Warnings:** files the library lacks, skipped intros, and sound the browser held back.
+  - **Errors:** files that didn't load, refused Play commands, and script errors.
+
+  A filter shows all entries, only warnings and errors, or the disc's navigation trace. The title counts warnings and
+  errors, and the Stats button gets a dot while one is unseen. **Copy** puts the whole log, with the state at the top,
+  on the clipboard as plain text. The panel's open or closed state is remembered per browser.
+- The log is kept for the browser tab, so after a hand-off the next Disc menu open shows what the web client did with
+  it: the session, the server's answer, and whether the title played or the details page opened. Entries from an
+  earlier open are dimmed.
+- **Wait before playing from menu** (in the Stats panel, off each time the menu opens) holds a title the disc starts
+  instead of playing it. A notice shows the selection and its audio and subtitles, and the log gets the full request:
+  the item, the position, the streams and why they were picked, and the session the Play command would go to.
+  **Play** sends it; **Back to menu** goes back to the disc's menu. Use it to check a pack without leaving the menu.
 - The button script runs with the viewer's login inside the web client, so it builds every element with
   `createElement` and `textContent`, never from markup, and only uses addresses on the page's own origin. The player
   page works the same way, and its routes send a strict Content-Security-Policy (its own scripts only, framed by this

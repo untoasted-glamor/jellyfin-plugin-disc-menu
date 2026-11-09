@@ -3,12 +3,14 @@
 // On a series' or movie's details page, when the item has a menu pack, it puts a "Disc menu" button next to Play.
 // The button opens the player page over the web client, full screen, in an iframe on the same origin, so the player
 // reuses the web client's login. When the disc starts a title, the overlay closes and the web client's own player
-// plays it, through a Play command the server sends to this web client's own session (Handoff, below).
+// plays it, through a Play command the server sends to this web client's own session (Handoff, below). What the hand-off
+// did goes into the tab's Disc menu log (debuglog.ts), which the next open's Stats panel shows.
 //
 // This runs inside the web client with the signed-in user's token, so it never turns data into markup: elements are
 // built with createElement, textContent and setAttribute only (test/safety.test.ts fails on the alternatives), the
 // item id must look like a Jellyfin id, and every address is built with URL and must stay on this origin.
-import { CLOSE_REQUEST, embedMessage, isBackKey, ITEM_ID, PLAY, PlayHandoff } from "./embed.js";
+import { appendEvent, Level, tabStore } from "./debuglog.js";
+import { CHECK, CHECKED, CheckResult, CLOSE_REQUEST, embedMessage, isBackKey, ITEM_ID, PLAY, PlayHandoff } from "./embed.js";
 
 export const BUTTON_CLASS = "btnDiscMenu";
 export const OVERLAY_ID = "discMenuOverlay";
@@ -194,7 +196,17 @@ export class DiscMenuButton {
     this.overlay = new Overlay(this.win, playerUrl(this.root, id), opener, screen, {
       closed: () => (this.overlay = null),
       play: (h, overlay) => void this.handOff(h, overlay, screen),
+      check: (h, overlay) => void this.check(h, overlay),
     });
+  }
+
+  /** "Wait before playing from menu": everything a hand-off does but the Play command, answered to the player. */
+  private async check(h: PlayHandoff, overlay: Overlay): Promise<void> {
+    const api = this.api();
+    const result = api
+      ? await new Handoff(this.win, this.root, api, this.fetcher).check(h)
+      : { session: null, detail: "The web client has no API client: the real hand-off would open the details page." };
+    overlay.reply(result);
   }
 
   /** The player handed a title over: the overlay goes, then the web client's player plays it (see Handoff). */
@@ -310,10 +322,11 @@ export class FullScreen {
   }
 }
 
-/** The overlay's links to the button: it closed, or the player handed a title over. */
+/** The overlay's links to the button: it closed, the player handed a title over, or it asked to check one. */
 interface OverlayEvents {
   closed(): void;
   play(h: PlayHandoff, overlay: Overlay): void;
+  check(h: PlayHandoff, overlay: Overlay): void;
 }
 
 /** The full-screen overlay: the player page in an iframe. The player has its own control bar (Close among them). */
@@ -326,6 +339,7 @@ export class Overlay {
     const m = embedMessage(e, this.frame.contentWindow, this.win.location.origin);
     if (m?.type === CLOSE_REQUEST) void this.close();
     else if (m?.type === PLAY && !this.leaving) this.events.play(m.play, this);
+    else if (m?.type === CHECK && !this.leaving) this.events.check(m.play, this);
   };
   private readonly onKey = (e: KeyboardEvent) => {
     // Keys reach the overlay itself only before the frame has the focus.
@@ -355,7 +369,8 @@ export class Overlay {
 
     this.frame = doc.createElement("iframe");
     this.frame.title = "Disc menu player";
-    this.frame.setAttribute("allow", "autoplay; fullscreen");
+    // clipboard-write: the Stats panel's Copy.
+    this.frame.setAttribute("allow", "autoplay; fullscreen; clipboard-write");
     Object.assign(this.frame.style, { width: "100%", height: "100%", border: "0", background: "#000" });
     this.frame.src = src;
     this.frame.addEventListener("load", () => {
@@ -373,6 +388,12 @@ export class Overlay {
     win.history.pushState({ discMenu: true }, "");
     win.addEventListener("popstate", this.onHistory);
     win.addEventListener("hashchange", this.onHistory);
+  }
+
+  /** Answers the player's CHECK (on our origin only). */
+  reply(result: CheckResult): void {
+    if (this.leaving) return;
+    this.frame.contentWindow?.postMessage({ type: CHECKED, result }, this.win.location.origin);
   }
 
   /** Closes the menu with no title handed over: leaves full screen too. */
@@ -428,6 +449,9 @@ interface SessionLike {
 
 export type HandoffResult = "playing" | "fallback" | "moved";
 
+/** "session 1a2b... (Jellyfin Web on device x)", for the log. */
+const describeSession = (s: SessionLike) => `session ${s.Id ?? "?"} (${s.Client ?? "?"} on device ${s.DeviceId ?? "?"})`;
+
 /**
  * Has the web client play a title the menu picked: a Play command (POST Sessions/{id}/Playing) to the web client's
  * own session, the same message a remote control sends. A page script can't start the web client's player itself.
@@ -444,7 +468,10 @@ export class Handoff {
     private readonly api: ApiClientLike,
     private readonly fetcher: typeof fetch = (...a) => win.fetch(...a),
     private readonly timing = { pollMs: 1000, confirmMs: 15_000 },
-    private readonly log: (s: string) => void = (s) => console.info(`[Disc menu] ${s}`),
+    private readonly log: (level: Level, s: string) => void = (level, s) => {
+      console.info(`[Disc menu] ${s}`);
+      appendEvent(tabStore(win), level, `Web client: ${s}`);
+    },
   ) {}
 
   /** `hash` is the web client's address when the hand-off began (the item's details page). */
@@ -454,28 +481,56 @@ export class Handoff {
     try {
       session = token ? await this.ownSession(token) : null;
       if (!session?.Id) {
-        this.log(`no session of this web client found for ${h.name}`);
+        this.log("warn", `${await this.noSession(token)} for ${h.name}`);
         return this.fallback(h, hash, token, null);
       }
       const before = session.NowPlayingItem?.Id ?? null;
-      const q = new URLSearchParams({ playCommand: "PlayNow", itemIds: h.itemId });
-      if (h.startTicks !== undefined) q.set("startPositionTicks", String(h.startTicks));
-      if (h.mediaSourceId !== undefined) q.set("mediaSourceId", h.mediaSourceId);
-      if (h.audioIndex !== undefined) q.set("audioStreamIndex", String(h.audioIndex));
-      if (h.subtitleIndex !== undefined) q.set("subtitleStreamIndex", String(h.subtitleIndex));
-      const url = new URL(`Sessions/${encodeURIComponent(session.Id)}/Playing?${q}`, this.root);
+      const url = this.playUrl(h, session.Id);
       const r = await this.fetcher(url.href, { method: "POST", headers: authHeader(token!) });
-      this.log(`Play ${h.name} (${q}) to session ${session.Id}: ${r.status}`);
+      this.log(r.ok ? "info" : "error", `Play command for ${h.name} to ${describeSession(session)}: HTTP ${r.status} (${url.search.slice(1)})`);
       if (!r.ok) return this.fallback(h, hash, token, session.Id);
       if (await this.confirm(token!, session.Id, h.itemId, before)) {
-        this.log(`${h.name} is playing`);
+        this.log("info", `${h.name} is playing`);
         return "playing";
       }
+      this.log("warn", `nothing new played within ${this.timing.confirmMs / 1000} s of the Play command`);
       return this.fallback(h, hash, token, session.Id);
     } catch (e) {
-      this.log(`hand-off failed: ${(e as Error).message}`);
+      this.log("error", `hand-off failed: ${(e as Error).message}`);
       return this.fallback(h, hash, token, session?.Id ?? null);
     }
+  }
+
+  /** "Wait before playing from menu": finds the session and builds the Play command, but doesn't send it. */
+  async check(h: PlayHandoff): Promise<CheckResult> {
+    const token = this.api.accessToken();
+    if (!token) return { session: null, detail: "The web client isn't signed in: the real hand-off would open the details page." };
+    try {
+      const session = await this.ownSession(token);
+      if (!session?.Id) return { session: null, detail: `${await this.noSession(token)}: the real hand-off would open the details page.` };
+      const url = this.playUrl(h, session.Id);
+      return { session: session.Id, detail: `Would send POST ${url.pathname}${url.search} to ${describeSession(session)}.` };
+    } catch (e) {
+      return { session: null, detail: `Couldn't read the sessions (${(e as Error).message}): the real hand-off would open the details page.` };
+    }
+  }
+
+  private playUrl(h: PlayHandoff, sessionId: string): URL {
+    const q = new URLSearchParams({ playCommand: "PlayNow", itemIds: h.itemId });
+    if (h.startTicks !== undefined) q.set("startPositionTicks", String(h.startTicks));
+    if (h.mediaSourceId !== undefined) q.set("mediaSourceId", h.mediaSourceId);
+    if (h.audioIndex !== undefined) q.set("audioStreamIndex", String(h.audioIndex));
+    if (h.subtitleIndex !== undefined) q.set("subtitleStreamIndex", String(h.subtitleIndex));
+    return new URL(`Sessions/${encodeURIComponent(sessionId)}/Playing?${q}`, this.root);
+  }
+
+  /** Why no session matched: what the web client looked for, and what the server lists for its device. */
+  private async noSession(token: string | null | undefined): Promise<string> {
+    const want = `device ${decoded(this.api.deviceId()) || "(none)"}, client ${decoded(this.api.appName()) || "(none)"}`;
+    if (!token) return `No session found (not signed in; ${want})`;
+    const list = await this.sessions(token).catch(() => null);
+    const seen = list === null ? "the session list couldn't be read" : `the server lists ${list.length} for this device${list.length ? `: ${list.map(describeSession).join("; ")}` : ""}`;
+    return `No session of this web client found (${want}; ${seen})`;
   }
 
   private async sessions(token: string): Promise<SessionLike[]> {
@@ -515,13 +570,16 @@ export class Handoff {
 
   /** Opens the title's details page, unless the web client has moved on or the session plays something after all. */
   private async fallback(h: PlayHandoff, hash: string, token: string | null | undefined, sessionId: string | null): Promise<HandoffResult> {
-    if (this.win.location.hash !== hash) return "moved";
+    const moved = (): HandoffResult => {
+      this.log("info", `the web client moved on by itself (${this.win.location.hash || "no address"}): no details page`);
+      return "moved";
+    };
+    if (this.win.location.hash !== hash) return moved();
     if (token && sessionId) {
       const s = (await this.sessions(token).catch(() => [])).find((x) => x.Id === sessionId);
-      if (s?.NowPlayingItem?.Id) return "moved";
-      if (this.win.location.hash !== hash) return "moved";
+      if (s?.NowPlayingItem?.Id || this.win.location.hash !== hash) return moved();
     }
-    this.log(`opening the details page of ${h.name}`);
+    this.log("warn", `opening the details page of ${h.name} instead`);
     this.win.location.hash = `#/details?id=${encodeURIComponent(h.itemId)}`;
     return "fallback";
   }

@@ -5,7 +5,9 @@ import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { DebugLog } from "../src/debuglog.js";
 import { discButton } from "../src/dom.js";
+import { StatsPanel } from "../src/stats.js";
 
 const FORBIDDEN = [
   /\.innerHTML\b/,
@@ -38,6 +40,25 @@ describe("no markup or code from strings", () => {
   it("plays no title on the page: no hls.js, no stream or transcode calls", () => {
     const hits = sources("src").filter(({ text }) => /from\s+"hls\.js|master\.m3u8|ActiveEncodings/.test(text)).map((f) => f.file);
     expect(hits).toEqual([]);
+  });
+
+  it("shows a log entry and live state made of markup as text in the Stats panel", () => {
+    const evil = '<img src=x onerror="window.pwned=1">';
+    const log = new DebugLog(null);
+    const stats = new StatsPanel(document, document.body, log, {
+      embedded: true, state: () => [`Disc: ${evil}`], prefs: { getItem: () => null, setItem: () => {} }, toggles: [],
+    });
+    log.add("error", `Couldn't load the menu file ${evil}`);
+    log.trace(evil);
+    stats.open();
+    expect(stats.el.querySelector("img")).toBeNull();
+    expect(stats.el.querySelector(".stats-log .text")!.textContent).toBe(`Couldn't load the menu file ${evil}`);
+    expect(stats.el.querySelector(".stats-state")!.textContent).toBe(`Disc: ${evil}`);
+    stats.el.querySelector<HTMLButtonElement>("#stats-f-trace")!.click();
+    expect(stats.el.querySelector("img")).toBeNull();
+    expect((window as unknown as { pwned?: number }).pwned).toBeUndefined();
+    stats.close();
+    stats.el.remove();
   });
 
   it("shows a disc name made of markup as text", () => {

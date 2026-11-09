@@ -138,6 +138,7 @@ export class HttpError extends Error {
 export interface PublicInfo {
   Id: string;
   ServerName?: string;
+  Version?: string;
 }
 
 export interface QuickConnectState {

@@ -54,3 +54,37 @@ export function describeHandoff(h: PlayHandoff): string {
   const subs = h.subtitleIndex === undefined ? "Jellyfin's choice" : h.subtitleIndex === -1 ? "off" : `stream ${h.subtitleIndex}`;
   return `${h.name} from ${at}, audio ${audio}, subtitles ${subs}`;
 }
+
+/** Why the hand-off sends what it sends for audio and subtitles, for the log. */
+export function handoffReasons(item: MediaItem, r: PlayRequest, now: StreamRegs, baseline: StreamRegs): { audio: string; subtitles: string } {
+  const picked = pickStreams(item.streams, r);
+  let audio: string;
+  if (now.audio === baseline.audio) audio = `not changed in the menu (SPRM 1 = ${now.audio}): Jellyfin's choice`;
+  else if (picked.audio === null) audio = `changed in the menu to ${r.audioLang3 ?? "an unknown language"}, which the file doesn't have: Jellyfin's choice`;
+  else audio = `changed in the menu to ${r.audioLang3}: stream ${picked.audio}`;
+  let subtitles: string;
+  const hex = `0x${now.subp.toString(16)}`;
+  if (now.subp === baseline.subp) subtitles = `not changed in the menu (SPRM 2 = ${hex}): Jellyfin's choice`;
+  else if (!(now.subp & SUBP_ON)) subtitles = `turned off in the menu (SPRM 2 = ${hex}): off (-1)`;
+  else if (picked.sub === null) subtitles = `changed in the menu to ${r.sidecar ?? r.subLang3 ?? "an unknown stream"}, which the file doesn't have: Jellyfin's choice`;
+  else subtitles = `changed in the menu to ${r.sidecar ?? r.subLang3}: stream ${picked.sub}`;
+  return { audio, subtitles };
+}
+
+/** What the hand-off sends, one field a line, for the log entry. */
+export function handoffDetail(h: PlayHandoff, why: { audio: string; subtitles: string }): string {
+  return [
+    `item ${h.itemId} (${h.name})`,
+    `start ${h.startTicks === undefined ? "at the top" : `${h.startTicks} ticks (${(h.startTicks / TICKS_PER_SECOND).toFixed(1)} s)`}`,
+    `media source ${h.mediaSourceId ?? "Jellyfin's choice"}`,
+    `audio ${h.audioIndex ?? "not sent"}: ${why.audio}`,
+    `subtitles ${h.subtitleIndex ?? "not sent"}: ${why.subtitles}`,
+  ].join("; ");
+}
+
+/** The notice over the menu while "Wait before playing from menu" holds a hand-off. */
+export function waitNotice(h: PlayHandoff): string[] {
+  const audio = h.audioIndex === undefined ? "Auto" : `Stream ${h.audioIndex}`;
+  const subs = h.subtitleIndex === undefined ? "Auto" : h.subtitleIndex === -1 ? "Off" : `Stream ${h.subtitleIndex}`;
+  return ["Waiting before playing from menu.", `Selection: ${h.name}`, `Audio: ${audio}`, `Subtitles: ${subs}`];
+}

@@ -1,7 +1,7 @@
 // What a title cell hands to the web client's player, on its own and through Sintel's own menus.
 import { describe, expect, it } from "vitest";
 import type { DvdVm } from "../src/dvdvm.js";
-import { describeHandoff, handoffFor, titleAction } from "../src/handoff.js";
+import { describeHandoff, handoffDetail, handoffFor, handoffReasons, titleAction, waitNotice } from "../src/handoff.js";
 import { MediaItem, mediaKey, PlayRequest } from "../src/media.js";
 import { loadPack, press, settle, startVm } from "./helpers.js";
 
@@ -64,6 +64,42 @@ describe("the hand-off", () => {
     expect(describeHandoff({ itemId: ITEM, name: "S01E03", startTicks: 25_000_000, audioIndex: 2, subtitleIndex: -1 }))
       .toBe("S01E03 from 2.5 s, audio stream 2, subtitles off");
     expect(describeHandoff({ itemId: ITEM, name: "S01E03" })).toBe("S01E03 from the start, audio Jellyfin's choice, subtitles Jellyfin's choice");
+  });
+});
+
+describe("the hand-off in the log and on the wait notice", () => {
+  it("says why each stream is sent or left to Jellyfin", () => {
+    expect(handoffReasons(item, req({ audioLang3: "deu", subLang3: "deu" }), NONE, NONE)).toEqual({
+      audio: "not changed in the menu (SPRM 1 = 15): Jellyfin's choice",
+      subtitles: "not changed in the menu (SPRM 2 = 0x3e): Jellyfin's choice",
+    });
+    expect(handoffReasons(item, req({ audioLang3: "deu", subLang3: "deu" }), { audio: 1, subp: 0x41 }, NONE)).toEqual({
+      audio: "changed in the menu to deu: stream 3",
+      subtitles: "changed in the menu to deu: stream 5",
+    });
+    expect(handoffReasons(item, req(), { audio: 15, subp: 0x01 }, { audio: 15, subp: 0x41 }).subtitles)
+      .toBe("turned off in the menu (SPRM 2 = 0x1): off (-1)");
+    expect(handoffReasons(item, req({ audioLang3: "fra", subLang3: "fra" }), { audio: 2, subp: 0x42 }, NONE)).toEqual({
+      audio: "changed in the menu to fra, which the file doesn't have: Jellyfin's choice",
+      subtitles: "changed in the menu to fra, which the file doesn't have: Jellyfin's choice",
+    });
+  });
+
+  it("lists what goes, one field after another", () => {
+    const h = handoffFor(item, req({ subLang3: "deu", offset: 2.5 }), { audio: 15, subp: 0x41 }, NONE);
+    const why = handoffReasons(item, req({ subLang3: "deu", offset: 2.5 }), { audio: 15, subp: 0x41 }, NONE);
+    expect(handoffDetail(h, why)).toBe(
+      `item ${ITEM} (Sintel); start 25000000 ticks (2.5 s); media source ${SOURCE}; ` +
+        "audio not sent: not changed in the menu (SPRM 1 = 15): Jellyfin's choice; subtitles 5: changed in the menu to deu: stream 5",
+    );
+  });
+
+  it("shows the selection and its streams on the wait notice", () => {
+    expect(waitNotice({ itemId: ITEM, name: "Sintel S01E01", subtitleIndex: 10 })).toEqual([
+      "Waiting before playing from menu.", "Selection: Sintel S01E01", "Audio: Auto", "Subtitles: Stream 10",
+    ]);
+    expect(waitNotice({ itemId: ITEM, name: "Sintel", audioIndex: 3, subtitleIndex: -1 }).slice(2)).toEqual(["Audio: Stream 3", "Subtitles: Off"]);
+    expect(waitNotice({ itemId: ITEM, name: "Sintel" })[3]).toBe("Subtitles: Auto");
   });
 });
 
