@@ -5,7 +5,9 @@ A Jellyfin plugin that plays a DVD's or Blu-ray's own title screen and menus, ne
 **Status:** v0.4 plays a DVD's menus in the web client. A series or movie with a menu pack gets a "Disc menu"
 button next to Play (it needs the [JavaScript Injector](#disc-menu-button) plugin). The button opens the disc's own
 menus full screen; a title picked in them plays in Jellyfin's own player, like any episode, with the audio and
-subtitles chosen in the menus. Blu-ray menus and a phone as the remote for a TV come in later releases. Nothing in this repo makes packs yet; see [Menu packs](#menu-packs) for what one holds.
+subtitles chosen in the menus. A Blu-ray's menus play too (HDMV discs; BD-J discs, pop-up menus, button sounds and
+animations are left out), and a pack can start specials and extras as well as episodes. A phone as the remote for a
+TV comes in a later release. Nothing in this repo makes packs yet; see [Menu packs](#menu-packs) for what one holds.
 
 Requires Jellyfin 12.0 or later.
 
@@ -36,11 +38,19 @@ The plugin serves:
 |---|---|---|
 | `GET /DiscMenu/Player/` and its files | None | The player page, embedded in the DLL. |
 | `GET /DiscMenu/Inject/button.js` | None | The Disc menu button's script, which runs in the web client (see [Disc menu button](#disc-menu-button)). |
-| `GET /DiscMenu/Items/{itemId}/Discs` | Yes, and the user must see the item | The item's packs: `Id` (folder name), `Name`, `Type` (`dvd`), and `Season` for a series. |
+| `GET /DiscMenu/Items/{itemId}/Discs` | Yes, and the user must see the item | The item's packs: `Id` (folder name), `Name`, `Type` (`dvd` or `bd`), and `Season` for a series. |
 | `GET /DiscMenu/Items/{itemId}/Discs/{disc}/Files/{path}` | Yes, and the user must see the item | One file of a pack, with range requests. A path that leads out of the pack, once links are followed, is refused. |
 | `GET /DiscMenu/Items/{itemId}/Discs/{disc}/Media` | Yes, and the user must see the item | Which library item plays each file the pack's titles name: `ItemId`, `MediaSourceId` and its audio and subtitle `Streams` with Jellyfin's indexes. A file the library lacks has no `ItemId`. |
 
 A login is a token in `Authorization: MediaBrowser Token="..."`, or `ApiKey=` in the URL for images and video.
+
+`menu.json` names its schema. A DVD's (`dvd-1`) holds the disc's title sets, program chains and cells with their
+commands, and the menus' backgrounds and button highlights; its `media` maps title cells to files. A Blu-ray's
+(`hdmv-1`) holds the disc's index, movie objects, playlists (play items, marks and streams) and the interactive
+graphics menus (pages, button overlap groups, each button's pictures, neighbours and commands); its `media` maps each
+playlist's time, in 45 kHz ticks, to the file that plays there. The player runs a Blu-ray's movie objects and
+buttons as libbluray does: a playlist start that falls in a mapped file hands it off, else a playlist with an
+always-on menu shows that menu over its background, else the playlist is skipped and the disc goes on.
 
 A series' episodes are found by season and episode number, because files are often renamed after a rip: the
 title's own `season` when it has one (0 for a special in `Season 00/`), else the pack's `disc.season`. A series'
@@ -86,8 +96,10 @@ switch for the button is set back on at the next start; to hide the button, unin
 - When the disc starts a title the library has, the menu goes and the web client's own player plays that episode or
   film, as if the viewer had pressed Play on it, starting where the menu points: it never resumes a part-watched
   episode. There is no way back from the episode to the menu. Watched state, resume points and Next Up change as for
-  any episode, and the next episodes are queued. Audio and subtitles go along only when the viewer changed them in the
-  disc's menus; otherwise Jellyfin picks them from the user's settings. With cinema mode on, a title started from the
+  any episode, and the next episodes are queued. A Blu-ray's play-all queues the titles the disc plays after the
+  first one (the ones the library has) instead. Audio and subtitles go along only when the viewer changed them in the
+  disc's menus; otherwise Jellyfin picks them from the user's settings. A Blu-ray that sets its own streams when it
+  starts an episode counts as unchanged when they are what it picks for its first menu's default button. With cinema mode on, a title started from the
   top can get Jellyfin's intros first, as with the Play button. The title plays wherever the web client plays (on a
   cast target when it is casting).
 - The hand-off is a Play command from the server to the web client's own session (as a remote control sends). If no
@@ -95,11 +107,12 @@ switch for the button is set back on at the next start; to hide the button, unin
 - Titles the disc starts before the viewer pressed any menu button (logos and warnings at first play) are skipped,
   so the disc gets to its menu.
 - **Stats** (the bar's Stats button, or `D` on a keyboard) opens a panel over the top left of the menu. It shows the live
-  state: the disc and pack, where the disc's navigation is (domain, title set, PGC and cell), its title, chapter,
-  audio, subpicture, button and general registers, the menu's buttons and media, the sign-in, and the plugin's and
-  server's versions. Below that is the log, with the time and seconds since the disc started:
+  state: the disc and pack, where the disc's navigation is (a DVD's domain, title set, PGC and cell; a Blu-ray's menu,
+  page, button and playlist), its title, chapter, audio, subpicture, button and general registers, the menu's buttons
+  and media, the sign-in, and the plugin's and server's versions. Below that is the log, with the time and seconds since the disc started:
   - **Info:** the menus shown and the buttons pressed.
-  - **Warnings:** files the library lacks, skipped intros, and sound the browser held back.
+  - **Warnings:** files the library lacks, skipped intros, sound the browser held back, and a Blu-ray's features the
+    player leaves out.
   - **Errors:** files that didn't load, refused Play commands, and script errors.
 
   A filter shows all entries, only warnings and errors, or the disc's navigation trace. The title counts warnings and
@@ -136,8 +149,9 @@ The C# tests are in [tests/](tests/) (xUnit v3 on Microsoft.Testing.Platform, op
 ### Menu player page
 
 The player page is TypeScript in [web/](web/): a DVD VM that runs a disc's own navigation commands
-(`src/dvdvm.ts`, after libdvdnav), the menu renderer (`src/player.ts`) and what a title hands to the web client's
-player (`src/handoff.ts`). The Disc menu button, the overlay and the Play command are `src/inject.ts` (with
+(`src/dvdvm.ts`, after libdvdnav), a Blu-ray HDMV VM with its interactive graphics menus (`src/hdmvvm.ts`, after
+libbluray's `hdmv_vm.c` and `graphics_controller.c`), the menu renderers (`src/player.ts`, and `src/bdpage.ts` for a
+Blu-ray) and what a title hands to the web client's player (`src/handoff.ts`). The Disc menu button, the overlay and the Play command are `src/inject.ts` (with
 `src/embed.ts`, the messages between the overlay and the player). `npm run build` writes the page to `web/dist/`
 and the button to `web/dist/inject/button.js`.
 
@@ -145,11 +159,13 @@ and the button to `web/dist/inject/button.js`.
 cd web
 npm ci --ignore-scripts
 npm run check    # type check
-npm test         # VM scenarios on the Sintel fixture, the hand-off, the button and overlay (happy-dom), the safety check
+npm test         # VM scenarios (the Sintel fixture; Blu-ray packs built in the test), the hand-off, the button and overlay (happy-dom), the safety check
 npm run serve    # http://127.0.0.1:8098/dist/index.html?pack=../fixtures/sintel/ (no login, stub playback)
 ```
 
-Test fixtures come from the Sintel DVD only (see [NOTICE](NOTICE)).
+Test fixtures come from the Sintel DVD only (see [NOTICE](NOTICE)); the Blu-ray tests build their packs in code.
+`DISC_MENU_PACKS=<folder> npm test` also walks real `hdmv-1` packs in that folder (`test/hdmvpacks.test.ts`, skipped
+without it).
 
 ## Release
 

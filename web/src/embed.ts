@@ -28,10 +28,13 @@ export interface PlayHandoff {
   subtitleIndex?: number;
   /** The title's name, for the log only. */
   name: string;
+  /** More items to play after it, in order (a Blu-ray play-all); the start and streams are the first item's. */
+  queue?: string[];
 }
 
-const KEYS = new Set(["itemId", "mediaSourceId", "startTicks", "audioIndex", "subtitleIndex", "name"]);
+const KEYS = new Set(["itemId", "mediaSourceId", "startTicks", "audioIndex", "subtitleIndex", "name", "queue"]);
 const NAME_MAX = 200;
+export const QUEUE_MAX = 100;
 
 const isIndex = (v: unknown) => Number.isSafeInteger(v) && (v as number) >= -1;
 
@@ -46,11 +49,16 @@ export function parsePlay(data: unknown): PlayHandoff | null {
   if (d.audioIndex !== undefined && !isIndex(d.audioIndex)) return null;
   if (d.subtitleIndex !== undefined && !isIndex(d.subtitleIndex)) return null;
   if (typeof d.name !== "string" || d.name.length > NAME_MAX) return null;
+  if (d.queue !== undefined) {
+    const q = d.queue;
+    if (!Array.isArray(q) || q.length > QUEUE_MAX || !q.every((id) => typeof id === "string" && ITEM_ID.test(id))) return null;
+  }
   const h: PlayHandoff = { itemId: d.itemId, name: d.name };
   if (d.mediaSourceId !== undefined) h.mediaSourceId = d.mediaSourceId as string;
   if (d.startTicks !== undefined) h.startTicks = d.startTicks as number;
   if (d.audioIndex !== undefined) h.audioIndex = d.audioIndex as number;
   if (d.subtitleIndex !== undefined) h.subtitleIndex = d.subtitleIndex as number;
+  if (d.queue !== undefined && (d.queue as string[]).length) h.queue = [...(d.queue as string[])];
   return h;
 }
 

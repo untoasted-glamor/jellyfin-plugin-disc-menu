@@ -3,15 +3,21 @@
 // The start is the cell's offset in the file. Audio and subtitles go only when the viewer changed them in the disc's
 // menus: the player keeps SPRM 1 (audio) and SPRM 2 (subpicture) as they were at the viewer's first button press, and
 // a stream whose register still holds that value is left to Jellyfin, which picks from the user's language settings.
-// Subtitles the viewer turned off go as -1.
+// Subtitles the viewer turned off go as -1. A Blu-ray's are PSR 1 and 2, with a baseline of its own (bdpage.ts).
 import type { PlayHandoff } from "./embed.js";
 import { MediaItem, pickStreams, PlayRequest } from "./media.js";
 
-/** The disc's audio and subpicture registers (SPRM 1 and 2). */
+/** The disc's audio and subpicture registers (a DVD's SPRM 1 and 2, a Blu-ray's PSR 1 and 2). */
 export interface StreamRegs {
   audio: number;
   subp: number;
+  /** Whether subtitles show: a Blu-ray's PSR 2 display flag. Left out for a DVD, whose SPRM 2 has the bit 0x40. */
+  subOn?: boolean;
 }
+
+const shown = (r: StreamRegs) => r.subOn ?? (r.subp & SUBP_ON) !== 0;
+/** The registers' names in the log. */
+const regNames = (r: StreamRegs) => (r.subOn === undefined ? ["SPRM 1", "SPRM 2"] : ["PSR 1", "PSR 2"]);
 
 const TICKS_PER_SECOND = 10_000_000;
 /** SPRM 2's "subpicture shown" bit. */
@@ -41,7 +47,7 @@ export function handoffFor(item: MediaItem, r: PlayRequest, now: StreamRegs, bas
   const picked = pickStreams(item.streams, r);
   if (now.audio !== baseline.audio && picked.audio !== null) h.audioIndex = picked.audio;
   if (now.subp !== baseline.subp) {
-    if (!(now.subp & SUBP_ON)) h.subtitleIndex = -1;
+    if (!shown(now)) h.subtitleIndex = -1;
     else if (picked.sub !== null) h.subtitleIndex = picked.sub;
   }
   return h;
@@ -52,20 +58,22 @@ export function describeHandoff(h: PlayHandoff): string {
   const at = h.startTicks ? `${(h.startTicks / TICKS_PER_SECOND).toFixed(1)} s` : "the start";
   const audio = h.audioIndex === undefined ? "Jellyfin's choice" : `stream ${h.audioIndex}`;
   const subs = h.subtitleIndex === undefined ? "Jellyfin's choice" : h.subtitleIndex === -1 ? "off" : `stream ${h.subtitleIndex}`;
-  return `${h.name} from ${at}, audio ${audio}, subtitles ${subs}`;
+  const more = h.queue?.length ? `, then ${h.queue.length} more` : "";
+  return `${h.name} from ${at}, audio ${audio}, subtitles ${subs}${more}`;
 }
 
 /** Why the hand-off sends what it sends for audio and subtitles, for the log. */
 export function handoffReasons(item: MediaItem, r: PlayRequest, now: StreamRegs, baseline: StreamRegs): { audio: string; subtitles: string } {
   const picked = pickStreams(item.streams, r);
+  const [a1, s2] = regNames(now);
   let audio: string;
-  if (now.audio === baseline.audio) audio = `not changed in the menu (SPRM 1 = ${now.audio}): Jellyfin's choice`;
+  if (now.audio === baseline.audio) audio = `not changed in the menu (${a1} = ${now.audio}): Jellyfin's choice`;
   else if (picked.audio === null) audio = `changed in the menu to ${r.audioLang3 ?? "an unknown language"}, which the file doesn't have: Jellyfin's choice`;
   else audio = `changed in the menu to ${r.audioLang3}: stream ${picked.audio}`;
   let subtitles: string;
   const hex = `0x${now.subp.toString(16)}`;
-  if (now.subp === baseline.subp) subtitles = `not changed in the menu (SPRM 2 = ${hex}): Jellyfin's choice`;
-  else if (!(now.subp & SUBP_ON)) subtitles = `turned off in the menu (SPRM 2 = ${hex}): off (-1)`;
+  if (now.subp === baseline.subp) subtitles = `not changed in the menu (${s2} = ${hex}): Jellyfin's choice`;
+  else if (!shown(now)) subtitles = `turned off in the menu (${s2} = ${hex}): off (-1)`;
   else if (picked.sub === null) subtitles = `changed in the menu to ${r.sidecar ?? r.subLang3 ?? "an unknown stream"}, which the file doesn't have: Jellyfin's choice`;
   else subtitles = `changed in the menu to ${r.sidecar ?? r.subLang3}: stream ${picked.sub}`;
   return { audio, subtitles };
@@ -79,6 +87,7 @@ export function handoffDetail(h: PlayHandoff, why: { audio: string; subtitles: s
     `media source ${h.mediaSourceId ?? "Jellyfin's choice"}`,
     `audio ${h.audioIndex ?? "not sent"}: ${why.audio}`,
     `subtitles ${h.subtitleIndex ?? "not sent"}: ${why.subtitles}`,
+    ...(h.queue?.length ? [`then ${h.queue.length} more: ${h.queue.join(", ")}`] : []),
   ].join("; ");
 }
 
@@ -86,5 +95,7 @@ export function handoffDetail(h: PlayHandoff, why: { audio: string; subtitles: s
 export function waitNotice(h: PlayHandoff): string[] {
   const audio = h.audioIndex === undefined ? "Auto" : `Stream ${h.audioIndex}`;
   const subs = h.subtitleIndex === undefined ? "Auto" : h.subtitleIndex === -1 ? "Off" : `Stream ${h.subtitleIndex}`;
-  return ["Waiting before playing from menu.", `Selection: ${h.name}`, `Audio: ${audio}`, `Subtitles: ${subs}`];
+  const lines = ["Waiting before playing from menu.", `Selection: ${h.name}`, `Audio: ${audio}`, `Subtitles: ${subs}`];
+  if (h.queue?.length) lines.push(`Then: ${h.queue.length} more`);
+  return lines;
 }

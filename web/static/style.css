@@ -139,3 +139,6 @@ pre { margin: 8px 0; font: 12px/1.4 ui-monospace, monospace; white-space: pre-wr
 .embedded .bar button { background: #0008; color: #fff; border-color: #fff6; }
 .embedded .bar button:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
 .embedded .bar button[hidden] { display: none; }
+/* A Blu-ray menu's buttons (bdpage.ts): each its own picture, at the disc's position. */
+.ig { position: absolute; inset: 0; overflow: hidden; }
+.ig .igb { position: absolute; height: auto; cursor: pointer; user-select: none; -webkit-user-drag: none; }

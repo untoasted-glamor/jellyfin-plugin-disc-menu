@@ -1,5 +1,5 @@
-// The menu player page: runs a DVD menu pack in the browser. Menus are drawn from the pack (background,
-// the disc's own subpicture overlay, per-button highlight images). Keys: arrows move, Enter/Space activate, M = Menu,
+// The menu player page: runs a DVD or Blu-ray menu pack in the browser. DVD menus are drawn from the pack (background,
+// the disc's own subpicture overlay, per-button highlight images); a Blu-ray's (hdmv-1) are bdpage.ts's. Keys: arrows move, Enter/Space activate, M = Menu,
 // T = Title menu (and Escape = Menu outside the overlay). Mouse hover selects, click or tap activates.
 //
 // The page opens a series' or movie's pack from the plugin with ?item=<id> (and &disc=<pack>, else the item's only
@@ -19,10 +19,12 @@
 // Stats panel (stats.ts; D, or the Stats button) shows it with the live state. With its "Wait before playing from menu"
 // switch on, a title the disc starts waits on a notice instead of going to the web client's player.
 import { AutoplayGate } from "./autoplay.js";
+import { BdPage, menuFiles } from "./bdpage.js";
 import { DebugLog, Level, tabStore } from "./debuglog.js";
 import { discButton } from "./dom.js";
 import { checkedMessage, CheckResult, embedInPlayer, isBackKey, isEmbedded, isInfoKey, PlayHandoff } from "./embed.js";
 import { ButtonJson, CellJson, DvdVm, MediaCell, MenuJson, Pack } from "./dvdvm.js";
+import type { HdmvPack } from "./hdmvvm.js";
 import { describeHandoff, handoffDetail, handoffFor, handoffReasons, StreamRegs, titleAction, waitNotice } from "./handoff.js";
 import { StatsPanel } from "./stats.js";
 import {
@@ -62,6 +64,10 @@ function packUrl(file: string): string {
 
 let pack: Pack;
 let vm: DvdVm;
+/** A Blu-ray pack, and the page part that runs it (instead of pack and vm). */
+let bdPack: HdmvPack | null = null;
+let bd: BdPage | null = null;
+const disc = () => (bdPack ?? pack).disc;
 /** A pack is loaded, and the viewer has started the disc (so there is a VM to send keys to). */
 let loaded = false;
 let running = false;
@@ -120,9 +126,11 @@ function mediaState(el: HTMLMediaElement | null): string {
 /** The live state at the top of the Stats panel and of a copied log. */
 function liveState(): string[] {
   const lines = [
-    `Disc: ${loaded ? pack.disc.name : "no pack loaded"}; pack ${discId ?? params.get("pack") ?? "none"}; schema ${loaded ? pack.schema : "none"}`,
+    `Disc: ${loaded ? disc().name : "no pack loaded"}; pack ${discId ?? params.get("pack") ?? "none"}; schema ${loaded ? (bdPack ?? pack).schema : "none"}`,
   ];
-  if (!vm) lines.push("VM: not started");
+  if (bd) {
+    lines.push(...bd.state(), `Menu: background video ${mediaState(menuLayer.querySelector("video"))}`);
+  } else if (!vm) lines.push("VM: not started");
   else {
     const sp = vm.sprm[2];
     lines.push(
@@ -491,6 +499,13 @@ function onKey(e: KeyboardEvent): void {
   }
   if (!running) return;
   const k = e.key;
+  if (bd) {
+    if (k === "m" || k === "M" || (k === "Escape" && !embedded)) menuKey("root");
+    else if (k === "t" || k === "T") menuKey("title");
+    else if (menuLayer.hidden || held || !bd.key(k)) return;
+    e.preventDefault();
+    return;
+  }
   // In the overlay the page is full screen, where the browser keeps Escape for leaving full screen.
   if (k === "m" || k === "M" || (k === "Escape" && !embedded)) {
     menuKey("root");
@@ -514,6 +529,12 @@ function menuKey(which: "root" | "title"): void {
   if (!running) return;
   hideWait();
   stopTitle();
+  if (bd) {
+    // A Blu-ray's title menu is its pop-up menu, which the player leaves out.
+    if (which === "title") status("The disc's pop-up menu isn't supported; Menu goes to its top menu.", "warn");
+    else bd.topMenu();
+    return;
+  }
   if (!vm.menuCall(which)) status(`The disc has no ${which} menu here.`, "warn");
   render();
 }
@@ -538,7 +559,7 @@ function stopAll(): void {
 function mediaTitle(m: Partial<MediaCell> & Pick<MediaCell, "file">): string {
   if (m.extra != null) return m.extra.split("/").pop() || m.file;
   if (m.episode == null) return m.file;
-  return `S${String(m.season ?? pack.disc.season ?? 1).padStart(2, "0")}E${String(m.episode).padStart(2, "0")}`;
+  return `S${String(m.season ?? disc().season ?? 1).padStart(2, "0")}E${String(m.episode).padStart(2, "0")}`;
 }
 
 /** Where the file plays to, as far as the pack knows: the end of the last cell mapped to it. */
@@ -664,6 +685,11 @@ function wirePlayback(p: StubPlayback): void {
     if (titleWatch && titleWatch.cellEnd !== null && t >= titleWatch.cellEnd - 0.1) next();
   };
   p.onended = () => {
+    if (bd) {
+      playback.key = null;
+      bd.showEnded();
+      return;
+    }
     // The file ended: finish every remaining cell that plays from it, then go on.
     const media = titleWatch?.media;
     let guard = 0;
@@ -671,6 +697,38 @@ function wirePlayback(p: StubPlayback): void {
     while (!vm.stopped && vm.state.domain === "VTS" && sameFile() && guard++ < 100) vm.cellEnded();
     playback.key = null;
     render();
+  };
+}
+
+/** What bdpage.ts uses of the page. */
+function bdHost() {
+  return {
+    doc: document,
+    stage,
+    menuLayer,
+    embedded,
+    packUrl,
+    watchLoad,
+    playVideo: (v: HTMLVideoElement) => autoplay.play(v, true),
+    status,
+    event: (level: Level, s: string) => dlog.add(level, s),
+    trace: log,
+    items: () => items,
+    waitFirst: () => stats.wait,
+    title: mediaTitle,
+    send: sendHandOff,
+    hold: waitHandOff,
+    show: (r: PlayRequest) => {
+      titleLayer.hidden = embedded;
+      if (!titleLayer.contains(playback.el)) titleLayer.replaceChildren(playback.el);
+      if (playback.key === requestKey(r)) playback.seek(r.offset);
+      else playback.load(r);
+    },
+    stopShow: () => {
+      stopTitle();
+      titleLayer.hidden = true;
+    },
+    refresh: showRegs,
   };
 }
 
@@ -917,7 +975,7 @@ async function findMedia(jf: Jellyfin): Promise<void> {
     (missing.length ? ` (missing ${missing.join(", ")})` : ""));
   dlog.add(missing.length ? "warn" : "info", `Library: ${n - missing.length} of ${n} of the pack's files found` +
     (missing.length ? `; missing ${missing.join(", ")}` : ""));
-  if (running && !vm.stopped && vm.state.domain === "VTS") render();
+  if (running && !bd && !vm.stopped && vm.state.domain === "VTS") render();
 }
 
 // ---------------------------------------------------------------------------- start
@@ -928,9 +986,14 @@ function restart(): void {
   hideWait();
   baseline = null;
   dlog.started();
-  dlog.add("info", `Start disc: ${pack.disc.name}`);
-  vm = new DvdVm(pack, { log });
+  dlog.add("info", `Start disc: ${disc().name}`);
   running = true;
+  if (bd) {
+    titleLayer.hidden = true;
+    bd.start();
+    return;
+  }
+  vm = new DvdVm(pack, { log });
   vm.start();
   render();
 }
@@ -944,13 +1007,25 @@ function startDisc(): void {
 async function loadPack(packBase: string, conn: Jellyfin | null): Promise<void> {
   base = packBase;
   packJf = conn;
+  let json: Pack | HdmvPack;
   if (conn) {
-    pack = await conn.get<Pack>(base.slice(conn.base.length) + "menu.json");
+    json = await conn.get<Pack | HdmvPack>(base.slice(conn.base.length) + "menu.json");
   } else {
     const r = await fetch(base + "menu.json");
     if (!r.ok) throw new HttpError(r.status, `${r.status} ${r.statusText}`);
-    pack = (await r.json()) as Pack;
+    json = (await r.json()) as Pack | HdmvPack;
   }
+  bd = null;
+  bdPack = null;
+  if (json.schema === "hdmv-1") {
+    const p = json as HdmvPack;
+    bdPack = p;
+    bd = new BdPage(p, bdHost());
+    // Warm the cache with every menu image so a menu never paints half-loaded.
+    for (const f of menuFiles(p)) new Image().src = packUrl(f);
+    return packLoaded();
+  }
+  pack = json as Pack;
   // Warm the cache with every menu image so a menu never paints half-loaded.
   const menus = [pack.vmg.menus, ...Object.values(pack.vts).map((v) => v.menus)].flatMap((m) => Object.values(m).flat());
   for (const cell of menus.flatMap((p) => p.cells)) {
@@ -960,8 +1035,12 @@ async function loadPack(packBase: string, conn: Jellyfin | null): Promise<void> 
       if (f) new Image().src = packUrl(f);
     }
   }
-  document.title = `Disc menu: ${pack.disc.name}`;
-  $("disc-name").textContent = pack.disc.name;
+  packLoaded();
+}
+
+function packLoaded(): void {
+  document.title = `Disc menu: ${disc().name}`;
+  $("disc-name").textContent = disc().name;
   loaded = true;
   $<HTMLButtonElement>("start").disabled = false;
   status("Ready. Press Start disc.");
@@ -987,7 +1066,7 @@ async function main(): Promise<void> {
   unblock.addEventListener("click", () => {
     unblock.hidden = true;
     autoplay.resume();
-    if (running && drawnCell?.menu) status(`${vm.where()}: menu, ${drawnCell.menu.buttons.length} buttons`);
+    if (running && !bd && drawnCell?.menu) status(`${vm.where()}: menu, ${drawnCell.menu.buttons.length} buttons`);
   });
   // The menus keep running for a page the browser restores from its back-forward cache; the stub's clock stops.
   window.addEventListener("pagehide", () => {
@@ -1030,7 +1109,7 @@ async function main(): Promise<void> {
       if (e.pointerType === "mouse") showBar();
     });
     stage.addEventListener("click", (e) => {
-      if (!(e.target as Element).closest(".btn, button, .stats, .wait")) showBar();
+      if (!(e.target as Element).closest(".btn, .igb, button, .stats, .wait")) showBar();
     });
   }
   go.addEventListener("click", startDisc);

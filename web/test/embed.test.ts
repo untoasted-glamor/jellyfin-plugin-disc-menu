@@ -64,8 +64,10 @@ describe("the hand-off's checks", () => {
       audioIndex: 0,
       subtitleIndex: -1,
       name: "n".repeat(200),
+      queue: Array.from({ length: 100 }, () => ITEM),
     };
     expect(parsePlay(full)).toEqual(full);
+    expect(parsePlay({ ...ok, queue: [] })).toEqual(ok);
     expect(parsePlay({ ...ok, startTicks: 0 })).toEqual({ ...ok, startTicks: 0 });
   });
 
@@ -82,6 +84,9 @@ describe("the hand-off's checks", () => {
     ["an extra key", { ...ok, url: "https://example.test/" }],
     ["no name", { itemId: ITEM }],
     ["a long name", { ...ok, name: "n".repeat(201) }],
+    ["a queue that isn't a list", { ...ok, queue: ITEM }],
+    ["a queue with something that isn't an id", { ...ok, queue: [ITEM, "../x"] }],
+    ["a queue past 100 items", { ...ok, queue: Array.from({ length: 101 }, () => ITEM) }],
     ["an array", [ok]],
     ["a string", "play"],
   ])("refuses %s", (_what, data) => {
