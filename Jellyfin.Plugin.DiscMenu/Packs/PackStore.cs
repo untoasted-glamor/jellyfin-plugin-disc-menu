@@ -130,8 +130,9 @@ public sealed class PackStore
     }
 
     /// <summary>
-    /// Reads which files a pack's title cells play: each distinct episode number, or file name when a cell has no
-    /// episode. A cell without a file name is skipped.
+    /// Reads which library items a pack's title cells play: each distinct episode (by season and number), extra (by
+    /// path) or, when a cell names neither, file name. A cell without a file name is skipped, except an extra, whose
+    /// file name is the last part of its path.
     /// </summary>
     /// <param name="itemFolder">The series or movie folder.</param>
     /// <param name="disc">The pack's folder name.</param>
@@ -154,14 +155,15 @@ public sealed class PackStore
                 return null;
             }
 
-            var cells = (pack.Media ?? []).Values
+            var titles = (pack.Media ?? []).Values
                 .SelectMany(pgc => (pgc.Cells ?? []).Values)
-                .Where(cell => !string.IsNullOrEmpty(cell.File));
-            var titles = cells
-                .Select(cell => new PackTitle(cell.Episode, cell.File!))
-                .DistinctBy(title => title.Episode?.ToString(CultureInfo.InvariantCulture) ?? "F:" + title.File)
-                .OrderBy(title => title.Episode is null)
+                .Select(ToTitle)
+                .OfType<PackTitle>()
+                .DistinctBy(title => title.Key, StringComparer.Ordinal)
+                .OrderBy(TitleGroup)
+                .ThenBy(title => title.Season)
                 .ThenBy(title => title.Episode)
+                .ThenBy(title => title.Extra, StringComparer.Ordinal)
                 .ThenBy(title => title.File, StringComparer.Ordinal)
                 .ToList();
             return new PackTitles(pack.Disc?.Season, titles);
@@ -172,6 +174,34 @@ public sealed class PackStore
             return null;
         }
     }
+
+    // A cell as the item it plays: an extra keeps its path (and takes its file name from it when the cell has none);
+    // an episode or movie cell needs a file name.
+    private static PackTitle? ToTitle(PackMediaCell cell)
+    {
+        if (!string.IsNullOrEmpty(cell.Extra))
+        {
+            var file = string.IsNullOrEmpty(cell.File) ? Path.GetFileName(cell.Extra.Replace('\\', '/')) : cell.File;
+            return string.IsNullOrEmpty(file) ? null : new PackTitle(null, file, null, cell.Extra);
+        }
+
+        if (string.IsNullOrEmpty(cell.File))
+        {
+            return null;
+        }
+
+        // A season only means something with an episode number.
+        return new PackTitle(cell.Episode, cell.File, cell.Episode is null ? null : cell.Season);
+    }
+
+    // The order titles are listed in: the pack's season's episodes, other seasons' episodes, extras, then files.
+    private static int TitleGroup(PackTitle title) => title switch
+    {
+        { Extra: not null } => 2,
+        { Episode: null } => 3,
+        { Season: null } => 0,
+        _ => 1,
+    };
 
     /// <summary>
     /// Whether a disc folder name or one segment of a pack path is safe to join to a folder: not empty, no
@@ -293,5 +323,11 @@ public sealed class PackStore
 
         [JsonPropertyName("episode")]
         public int? Episode { get; set; }
+
+        [JsonPropertyName("season")]
+        public int? Season { get; set; }
+
+        [JsonPropertyName("extra")]
+        public string? Extra { get; set; }
     }
 }

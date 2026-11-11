@@ -163,6 +163,90 @@ public sealed class MediaLookupTests
         Assert.Null(Assert.Single(_lookup.Map(movie, Movie("Sintel (2010).mkv"), _alice).Titles).ItemId);
     }
 
+    [Fact]
+    public void Series_special_is_found_in_season_0_beside_the_packs_own_season()
+    {
+        var e1 = Episode(1, "Pilot", season: 1);
+        var s1 = Episode(1, "Special", season: 0);
+        EpisodesIn(1, e1);
+        EpisodesIn(0, s1);
+        Sources(e1, Source("/tv/Show/Season 01/e1.mkv"));
+        Sources(s1, Source("/tv/Show/Season 00/s1.mkv"));
+
+        var media = _lookup.Map(
+            _series,
+            new PackTitles(1, [new PackTitle(1, "e1.mkv"), new PackTitle(1, "s1.mkv", Season: 0)]),
+            _alice);
+
+        Assert.Equal((e1.Id, (int?)null), (media.Titles[0].ItemId, media.Titles[0].Season));
+        Assert.Equal((s1.Id, (int?)0, "Special"), (media.Titles[1].ItemId, media.Titles[1].Season, media.Titles[1].Name));
+        _library.Received(1).GetItemList(Arg.Is<InternalItemsQuery>(q => q.ParentIndexNumber == 0 && q.User == _alice));
+        _library.Received(1).GetItemList(Arg.Is<InternalItemsQuery>(q => q.ParentIndexNumber == 1));
+    }
+
+    [Fact]
+    public void Series_special_in_a_pack_with_no_season_is_still_found()
+    {
+        var s2 = Episode(2, "Special", season: 0);
+        EpisodesIn(0, s2);
+        Sources(s2, Source("/tv/Show/Season 00/s2.mkv"));
+
+        var media = _lookup.Map(_series, new PackTitles(null, [new PackTitle(2, "s2.mkv", Season: 0)]), null);
+
+        Assert.Equal(s2.Id, Assert.Single(media.Titles).ItemId);
+    }
+
+    [Fact]
+    public void Series_extras_are_found_by_file_name_among_the_series_extras()
+    {
+        var trailer = Extra("/tv/Show/trailers/Trailers.mkv", ExtraType.Trailer);
+        var op = Extra("/tv/Show/other/Opening.mkv", ExtraType.Unknown);
+        var sameName = Extra("/tv/Show/extras/Opening.mkv", ExtraType.Unknown);
+        Extras(trailer, sameName, op);
+        Sources(trailer, Source("/tv/Show/trailers/Trailers.mkv", Stream(1, MediaStreamType.Audio, "eng")));
+        Sources(op, Source("/tv/Show/other/Opening.mkv"));
+
+        var media = _lookup.Map(
+            _series,
+            new PackTitles(1, [
+                new PackTitle(null, "Trailers.mkv", Extra: "trailers/trailers.MKV"),
+                new PackTitle(null, "Opening.mkv", Extra: "other/Opening.mkv"),
+            ]),
+            _alice);
+
+        var first = media.Titles[0];
+        Assert.Equal((trailer.Id, "trailers/trailers.MKV", "src-Trailers.mkv"), (first.ItemId, first.Extra, first.MediaSourceId));
+        Assert.Equal([new TitleTrack(1, "Audio", "eng", false)], first.Streams);
+        Assert.Equal(op.Id, media.Titles[1].ItemId);
+        _library.Received(1).GetItemList(Arg.Is<InternalItemsQuery>(q =>
+            q.OwnerIds.SequenceEqual(new[] { _series.Id }) && q.User == _alice));
+        _library.DidNotReceive().GetItemList(Arg.Is<InternalItemsQuery>(q => q.ParentIndexNumber != null));
+    }
+
+    [Fact]
+    public void Series_extra_the_library_lacks_is_listed_without_an_item()
+    {
+        var notAnExtra = new Video { Id = Guid.NewGuid(), Name = "Owned", Path = "/tv/Show/extras/Gone.mkv" };
+        Extras(notAnExtra, Extra("/tv/Show/extras/Other.mkv", ExtraType.Unknown));
+
+        var media = _lookup.Map(
+            _series,
+            new PackTitles(1, [new PackTitle(null, "Gone.mkv", Extra: "extras/Gone.mkv")]),
+            _alice);
+
+        Assert.Equal(new TitleMedia(null, "Gone.mkv", Extra: "extras/Gone.mkv"), Assert.Single(media.Titles));
+    }
+
+    [Fact]
+    public void Series_special_the_library_lacks_keeps_its_season()
+    {
+        EpisodesIn(0);
+
+        var media = _lookup.Map(_series, new PackTitles(1, [new PackTitle(4, "s4.mkv", Season: 0)]), _alice);
+
+        Assert.Equal(new TitleMedia(4, "s4.mkv", Season: 0), Assert.Single(media.Titles));
+    }
+
     private static PackTitles Pack(int? season, params (int Episode, string File)[] titles)
     {
         return new PackTitles(season, titles.Select(t => new PackTitle(t.Episode, t.File)).ToList());
@@ -173,9 +257,14 @@ public sealed class MediaLookupTests
         return new PackTitles(null, files.Order(StringComparer.Ordinal).Select(f => new PackTitle(null, f)).ToList());
     }
 
-    private static Episode Episode(int number, string name)
+    private static Episode Episode(int number, string name, int season = 2)
     {
-        return new Episode { Id = Guid.NewGuid(), Name = name, IndexNumber = number, ParentIndexNumber = 2 };
+        return new Episode { Id = Guid.NewGuid(), Name = name, IndexNumber = number, ParentIndexNumber = season };
+    }
+
+    private static Video Extra(string path, ExtraType type)
+    {
+        return new Video { Id = Guid.NewGuid(), Name = System.IO.Path.GetFileNameWithoutExtension(path), Path = path, ExtraType = type };
     }
 
     private static MediaSourceInfo Source(string path, params MediaStream[] streams)
@@ -197,7 +286,18 @@ public sealed class MediaLookupTests
 
     private void Episodes(params Episode[] episodes)
     {
-        _library.GetItemList(Arg.Any<InternalItemsQuery>()).Returns(episodes.Cast<BaseItem>().ToList());
+        _library.GetItemList(Arg.Is<InternalItemsQuery>(q => q.OwnerIds.Length == 0)).Returns(episodes.Cast<BaseItem>().ToList());
+    }
+
+    private void EpisodesIn(int season, params Episode[] episodes)
+    {
+        _library.GetItemList(Arg.Is<InternalItemsQuery>(q => q.OwnerIds.Length == 0 && q.ParentIndexNumber == season))
+            .Returns(episodes.Cast<BaseItem>().ToList());
+    }
+
+    private void Extras(params BaseItem[] extras)
+    {
+        _library.GetItemList(Arg.Is<InternalItemsQuery>(q => q.OwnerIds.Length > 0)).Returns(extras.ToList());
     }
 
     private void Sources(BaseItem item, params MediaSourceInfo[] sources)
