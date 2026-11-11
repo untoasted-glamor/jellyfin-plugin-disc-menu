@@ -44,11 +44,19 @@ export interface PgcJson {
   txt: { pre: string[]; post: string[]; cellcmds: string[] };
   cells: CellJson[];
 }
-/** Where a title cell's video lives: a series episode (by number) or a movie file (by name), and where in it. */
+/**
+ * Where a title cell's video lives, and where in it: a series episode (by number, and by season when it isn't the
+ * pack's; a special is season 0), a series extra (by its path under the show folder, such as
+ * "trailers/Trailers.mkv") or a movie file (by name). `file` is always the file's name.
+ */
 export interface MediaCell {
   episode?: number;
+  season?: number;
+  extra?: string;
   offset: number;
   file: string;
+  /** Seconds the cell covers (hdmv-1 cells; dvd-1 takes the cell's own length from the disc). */
+  dur?: number;
 }
 export interface Pack {
   schema: string;

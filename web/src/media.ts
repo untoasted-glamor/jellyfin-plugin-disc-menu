@@ -3,9 +3,9 @@
 import type { MediaCell } from "./dvdvm.js";
 
 export interface PlayRequest {
-  /** Which file: "E<n>" for a series episode, "F:<file name>" for a movie (see mediaKey). */
+  /** Which item: "E<n>", "S<s>E<n>" or "X:<extra path>" for a series, "F:<file name>" for a movie (see mediaKey). */
   media: string;
-  /** What the viewer sees for it: "S01E03" or the movie's file name. */
+  /** What the viewer sees for it: "S01E03", "S00E01", or the extra's or movie's file name. */
   title: string;
   offset: number;
   /** How long the file is, as far as the pack knows (the end of its last cell). */
@@ -17,8 +17,16 @@ export interface PlayRequest {
   label: string;
 }
 
-/** A series episode is found by its number (file names change after a rip); a movie by its file name. */
-export const mediaKey = (m: MediaCell): string => (m.episode !== undefined ? `E${m.episode}` : `F:${m.file}`);
+/**
+ * The key a cell's item is found by, the same one the plugin's Media route reports: an extra by its path ("X:"), a
+ * series episode by its number ("E<n>" in the pack's season, "S<s>E<n>" in another, such as season 0 for a special;
+ * file names change after a rip), else a movie by its file name ("F:").
+ */
+export function mediaKey(m: Partial<MediaCell> & Pick<MediaCell, "file">): string {
+  if (m.extra != null) return `X:${m.extra}`;
+  if (m.episode != null) return m.season != null ? `S${m.season}E${m.episode}` : `E${m.episode}`;
+  return `F:${m.file}`;
+}
 
 export const requestKey = (r: PlayRequest) => `${r.media}|${r.audioLang3}|${r.sidecar}|${r.subLang3}`;
 
@@ -38,6 +46,10 @@ export interface Stream {
 /** One file a pack names and what plays it (the plugin's Media route). One the library lacks has no ItemId. */
 export interface TitleMedia {
   Episode?: number;
+  /** Set when the pack gave the episode a season of its own (0 for a special). */
+  Season?: number;
+  /** An extra's path under the show folder, as the pack gives it. */
+  Extra?: string;
   File: string;
   ItemId?: string;
   Name?: string;
@@ -70,7 +82,7 @@ export function mediaItems(media: DiscMedia): Map<string, MediaItem> {
   const items = new Map<string, MediaItem>();
   for (const t of media.Titles) {
     if (!t.ItemId || !t.MediaSourceId) continue;
-    const key = mediaKey({ offset: 0, file: t.File, episode: t.Episode });
+    const key = mediaKey({ file: t.File, episode: t.Episode, season: t.Season, extra: t.Extra });
     items.set(key, { id: t.ItemId, name: t.Name ?? t.File, mediaSourceId: t.MediaSourceId, streams: t.Streams ?? [] });
   }
   return items;
