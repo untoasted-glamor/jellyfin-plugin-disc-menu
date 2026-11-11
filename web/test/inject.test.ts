@@ -373,6 +373,12 @@ describe("the hand-off", () => {
     expect(window.location.hash).toBe(`#/details?id=${SERIES}`);
   });
 
+  it("sends a play-all's queue after its first item", async () => {
+    const srv = sessionServer({ playing: EPISODE });
+    expect(await run(srv, { itemId: EPISODE, name: "S01E10", queue: [SERIES, USER] })).toBe("playing");
+    expect(srv.plays[0].searchParams.get("itemIds")).toBe(`${EPISODE},${SERIES},${USER}`);
+  });
+
   it("leaves out what the menu didn't pick", async () => {
     const srv = sessionServer();
     await run(srv, { itemId: EPISODE, name: "S01E01" });

@@ -516,7 +516,7 @@ export class Handoff {
   }
 
   private playUrl(h: PlayHandoff, sessionId: string): URL {
-    const q = new URLSearchParams({ playCommand: "PlayNow", itemIds: h.itemId });
+    const q = new URLSearchParams({ playCommand: "PlayNow", itemIds: [h.itemId, ...(h.queue ?? [])].join(",") });
     if (h.startTicks !== undefined) q.set("startPositionTicks", String(h.startTicks));
     if (h.mediaSourceId !== undefined) q.set("mediaSourceId", h.mediaSourceId);
     if (h.audioIndex !== undefined) q.set("audioStreamIndex", String(h.audioIndex));
