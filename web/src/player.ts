@@ -534,10 +534,11 @@ function stopAll(): void {
   stopTitle();
 }
 
-/** "S01E03" for an episode, the file name for a movie. */
-function mediaTitle(m: MediaCell): string {
-  if (m.episode === undefined) return m.file;
-  return `S${String(pack.disc.season ?? 1).padStart(2, "0")}E${String(m.episode).padStart(2, "0")}`;
+/** "S01E03" for an episode ("S00E01" for a special), the file name for an extra or a movie. */
+function mediaTitle(m: Partial<MediaCell> & Pick<MediaCell, "file">): string {
+  if (m.extra != null) return m.extra.split("/").pop() || m.file;
+  if (m.episode == null) return m.file;
+  return `S${String(m.season ?? pack.disc.season ?? 1).padStart(2, "0")}E${String(m.episode).padStart(2, "0")}`;
 }
 
 /** Where the file plays to, as far as the pack knows: the end of the last cell mapped to it. */
@@ -909,7 +910,7 @@ function chooseDisc(discs: DiscInfo[]): void {
 async function findMedia(jf: Jellyfin): Promise<void> {
   jfState("Connecting...");
   const media = await jf.media(itemId!, discId!);
-  const missing = media.Titles.filter((t) => !t.ItemId).map((t) => mediaTitle({ offset: 0, file: t.File, episode: t.Episode }));
+  const missing = media.Titles.filter((t) => !t.ItemId).map((t) => mediaTitle({ file: t.File, episode: t.Episode, season: t.Season, extra: t.Extra }));
   items = mediaItems(media);
   const n = media.Titles.length;
   jfState(`Connected: ${media.Name}, ${n - missing.length} of ${n} files found` +

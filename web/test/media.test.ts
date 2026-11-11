@@ -24,6 +24,31 @@ test("files the library has are keyed like the pack's cells; missing ones are le
   expect(mediaKey({ offset: 12, file: "renamed.mkv", episode: 1 })).toBe("E1");
 });
 
+test("specials and extras get keys of their own, matching the Media route's", () => {
+  expect(mediaKey({ offset: 0, file: "sp.mkv", episode: 1, season: 0 })).toBe("S0E1");
+  expect(mediaKey({ offset: 0, file: "e1.mkv", episode: 1 })).toBe("E1");
+  expect(mediaKey({ offset: 0, file: "Trailers.mkv", extra: "trailers/Trailers.mkv", dur: 423.34 })).toBe(
+    "X:trailers/Trailers.mkv",
+  );
+  // An extra wins over an episode number; a season with no episode number means nothing.
+  expect(mediaKey({ offset: 0, file: "x.mkv", episode: 3, extra: "extras/x.mkv" })).toBe("X:extras/x.mkv");
+  expect(mediaKey({ offset: 0, file: "loose.mkv", season: 0 })).toBe("F:loose.mkv");
+
+  const items = mediaItems({
+    Name: "Show",
+    Titles: [
+      { Episode: 1, File: "e1.mkv", ItemId: "e1", MediaSourceId: "s1" },
+      { Episode: 1, Season: 0, File: "sp1.mkv", ItemId: "sp1", Name: "Special", MediaSourceId: "s2" },
+      { File: "Trailers.mkv", Extra: "trailers/Trailers.mkv", ItemId: "t", Name: "Trailers", MediaSourceId: "s3" },
+      { File: "Gone.mkv", Extra: "extras/Gone.mkv" },
+      // Jellyfin may send unset fields as null.
+      { Episode: 2, Season: null as unknown as undefined, File: "e2.mkv", ItemId: "e2", MediaSourceId: "s4" },
+    ],
+  });
+  expect([...items.keys()]).toEqual(["E1", "S0E1", "X:trailers/Trailers.mkv", "E2"]);
+  expect(items.get("S0E1")?.name).toBe("Special");
+});
+
 const streams: Stream[] = [
   { Index: 1, Type: "Audio", Language: "eng", IsExternal: false },
   { Index: 2, Type: "Audio", Language: "deu", IsExternal: false },

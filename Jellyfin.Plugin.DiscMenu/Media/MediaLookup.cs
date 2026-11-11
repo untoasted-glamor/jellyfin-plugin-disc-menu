@@ -14,9 +14,9 @@ using MediaBrowser.Model.Entities;
 namespace Jellyfin.Plugin.DiscMenu.Media;
 
 /// <summary>
-/// Maps the files a pack's title cells name to Jellyfin items and their streams. A series' files are found by the
-/// pack's season and each cell's episode number, since file names change after a rip; a movie's by file name among
-/// its versions.
+/// Maps the items a pack's title cells name to Jellyfin items and their streams. A series' episodes are found by
+/// season (the cell's, else the pack's) and episode number, since file names change after a rip; its extras by file
+/// name among the series' extras; a movie's files by file name among its versions.
 /// </summary>
 public sealed class MediaLookup
 {
@@ -61,7 +61,21 @@ public sealed class MediaLookup
                 s.IsExternal,
                 s.IsExternal && !string.IsNullOrEmpty(s.Path) ? Path.GetFileName(s.Path) : null))
             .ToList();
-        return new TitleMedia(title.Episode, title.File, item.Id, item.Name, source.Id, streams);
+        return new TitleMedia(title.Episode, title.File, item.Id, item.Name, source.Id, streams, title.Season, title.Extra);
+    }
+
+    private static TitleMedia Missing(PackTitle title) => new(title.Episode, title.File, Season: title.Season, Extra: title.Extra);
+
+    // The extra with the pack's file name; when several have it (in different folders), the one in the pack's folder.
+    private static BaseItem? PickExtra(IReadOnlyList<BaseItem> extras, PackTitle title)
+    {
+        var named = extras
+            .Where(e => string.Equals(Path.GetFileName(e.Path), title.ExtraFileName, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        var folder = Path.GetDirectoryName(title.Extra!.Replace('\\', '/'));
+        return named.FirstOrDefault(e => !string.IsNullOrEmpty(folder)
+                && string.Equals(Path.GetFileName(Path.GetDirectoryName(e.Path)), Path.GetFileName(folder), StringComparison.OrdinalIgnoreCase))
+            ?? named.FirstOrDefault();
     }
 
     // The source whose file has the pack's file name, else the item's first (default) source when allowed.
@@ -73,8 +87,15 @@ public sealed class MediaLookup
 
     private List<TitleMedia> MapEpisodes(Series series, PackTitles pack, User? user)
     {
-        var episodes = new Dictionary<int, Episode>();
-        if (pack.Season is int season && pack.Titles.Any(t => t.Episode is not null))
+        // One query per season the pack names: its own, plus any its cells give (season 0 for specials).
+        var episodes = new Dictionary<(int Season, int Number), Episode>();
+        var seasons = pack.Titles
+            .Where(t => t.Extra is null && t.Episode is not null)
+            .Select(t => t.Season ?? pack.Season)
+            .OfType<int>()
+            .Distinct()
+            .Order();
+        foreach (var season in seasons)
         {
             var query = new InternalItemsQuery(user)
             {
@@ -88,21 +109,41 @@ public sealed class MediaLookup
             {
                 if (episode.IndexNumber is int number)
                 {
-                    episodes.TryAdd(number, episode);
+                    episodes.TryAdd((season, number), episode);
                 }
             }
         }
 
+        // The series' extras, as BaseItem.GetExtras lists them (items owned by the series), with the user's access.
+        IReadOnlyList<BaseItem> extras = [];
+        if (pack.Titles.Any(t => t.Extra is not null))
+        {
+            extras = _libraryManager.GetItemList(new InternalItemsQuery(user) { OwnerIds = [series.Id] })
+                .Where(e => e.ExtraType is not null)
+                .ToList();
+        }
+
         return pack.Titles.Select(title =>
         {
-            if (title.Episode is not int number || !episodes.TryGetValue(number, out var episode))
+            BaseItem? item = null;
+            if (title.Extra is not null)
             {
-                return new TitleMedia(title.Episode, title.File);
+                item = PickExtra(extras, title);
+            }
+            else if (title.Episode is int number && (title.Season ?? pack.Season) is int season
+                && episodes.TryGetValue((season, number), out var episode))
+            {
+                item = episode;
             }
 
-            // An episode with several versions plays the one with the pack's file name, else its default.
-            var source = PickSource(_mediaSourceManager.GetStaticMediaSources(episode, false, user), title.File, firstIfNoMatch: true);
-            return source is null ? new TitleMedia(title.Episode, title.File) : Found(title, episode, source);
+            if (item is null)
+            {
+                return Missing(title);
+            }
+
+            // An item with several versions plays the one with the pack's file name, else its default.
+            var source = PickSource(_mediaSourceManager.GetStaticMediaSources(item, false, user), title.File, firstIfNoMatch: true);
+            return source is null ? Missing(title) : Found(title, item, source);
         }).ToList();
     }
 
@@ -115,7 +156,7 @@ public sealed class MediaLookup
         return pack.Titles.Select(title =>
         {
             var source = PickSource(sources, title.File, firstIfNoMatch: single);
-            return source is null ? new TitleMedia(title.Episode, title.File) : Found(title, movie, source);
+            return source is null ? Missing(title) : Found(title, movie, source);
         }).ToList();
     }
 }

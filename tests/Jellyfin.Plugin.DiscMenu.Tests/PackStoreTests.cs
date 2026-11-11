@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Linq;
 using Jellyfin.Plugin.DiscMenu.Packs;
 using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
@@ -239,6 +240,54 @@ public sealed class PackStoreTests : IDisposable
         Assert.Equal(
             [new PackTitle(9, "a.mkv"), new PackTitle(10, "b.mkv"), new PackTitle(null, "menu-extra.mkv")],
             titles.Titles);
+    }
+
+    [Fact]
+    public void ReadTitles_lists_specials_and_extras_after_the_packs_own_episodes()
+    {
+        _media.WriteMenu("bd2", """
+            {"schema":"hdmv-1","disc":{"type":"bd","name":"Show","season":1},"media":{
+              "00008":{"cells":{"0":{"offset":0,"dur":1440,"file":"e10.mkv","episode":10},
+                                "64800000":{"offset":0,"dur":1440,"file":"e11.mkv","episode":11}}},
+              "00009":{"cells":{"0":{"offset":0,"dur":1440,"file":"e10.mkv","episode":10}}},
+              "00022":{"cells":{"0":{"offset":0,"dur":314,"file":"s1.mkv","season":0,"episode":1},
+                                "14130000":{"offset":0,"dur":377,"file":"s2.mkv","season":0,"episode":2}}},
+              "00023":{"cells":{"0":{"offset":0,"file":"s1.mkv","season":0,"episode":1}}},
+              "00021":{"cells":{"0":{"offset":0,"file":"Trailers.mkv","extra":"trailers/Trailers.mkv"}}},
+              "00029":{"cells":{"0":{"offset":0,"extra":"other/Opening.mkv"}}},
+              "00030":{"cells":{"0":{"offset":0,"file":"loose.mkv","season":0}}}}}
+            """);
+
+        var titles = _store.ReadTitles(_media.Item, "bd2");
+
+        Assert.NotNull(titles);
+        Assert.Equal(
+            [
+                new PackTitle(10, "e10.mkv"),
+                new PackTitle(11, "e11.mkv"),
+                new PackTitle(1, "s1.mkv", 0),
+                new PackTitle(2, "s2.mkv", 0),
+                new PackTitle(null, "Opening.mkv", Extra: "other/Opening.mkv"),
+                new PackTitle(null, "Trailers.mkv", Extra: "trailers/Trailers.mkv"),
+                new PackTitle(null, "loose.mkv"),
+            ],
+            titles.Titles);
+        Assert.Equal(
+            ["E10", "E11", "S0E1", "S0E2", "X:other/Opening.mkv", "X:trailers/Trailers.mkv", "F:loose.mkv"],
+            titles.Titles.Select(t => t.Key));
+    }
+
+    [Fact]
+    public void ReadTitles_keeps_an_episode_in_the_packs_season_apart_from_the_same_number_in_season_0()
+    {
+        _media.WriteMenu("d1", """
+            {"disc":{"type":"dvd","name":"Show","season":1},"media":{
+              "1:1":{"cells":{"1":{"offset":0,"file":"e1.mkv","episode":1},"2":{"offset":0,"file":"sp1.mkv","season":0,"episode":1}}}}}
+            """);
+
+        var titles = _store.ReadTitles(_media.Item, "d1");
+
+        Assert.Equal([new PackTitle(1, "e1.mkv"), new PackTitle(1, "sp1.mkv", 0)], titles!.Titles);
     }
 
     [Fact]

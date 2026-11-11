@@ -42,8 +42,12 @@ The plugin serves:
 
 A login is a token in `Authorization: MediaBrowser Token="..."`, or `ApiKey=` in the URL for images and video.
 
-A series' files are found by the pack's `disc.season` and each title's episode number, because files are often
-renamed after a rip. A movie's are found by file name among its versions; a pack that plays a single file plays
+A series' episodes are found by season and episode number, because files are often renamed after a rip: the
+title's own `season` when it has one (0 for a special in `Season 00/`), else the pack's `disc.season`. A series'
+extras (a title with `extra`, its path under the show folder such as `trailers/Trailers.mkv`, `other/…` or
+`extras/…`) are found by file name among the extras Jellyfin lists for the series, preferring one in the same
+folder. The Media route echoes each title's `Season` and `Extra`. A movie's files are found by file name among its
+versions; a pack that plays a single file plays
 the movie even when the file was renamed. Stream indexes are looked up on every request, since an added subtitle
 file shifts them.
 
