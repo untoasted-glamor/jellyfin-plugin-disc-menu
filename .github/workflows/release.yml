@@ -79,13 +79,16 @@ jobs:
         run: |
           zip=$(python3 scripts/package.py package --version "$VERSION" --publish-dir publish --out dist --changelog "$CHANGELOG")
           echo "ZIP=$zip" >> "$GITHUB_ENV"
+          # The walk back end for Node (P13), which ARM vendors by its sha256.
+          cp web/walk-dist/walk.mjs dist/walk.mjs
+          (cd dist && sha256sum walk.mjs > walk.mjs.sha256)
       - name: Publish the GitHub Release
         if: env.SKIP != '1'
         run: |
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" "$ZIP" --clobber
+            gh release upload "$TAG" "$ZIP" dist/walk.mjs dist/walk.mjs.sha256 --clobber
           else
-            gh release create "$TAG" "$ZIP" --title "$TAG" --notes "$CHANGELOG" --verify-tag
+            gh release create "$TAG" "$ZIP" dist/walk.mjs dist/walk.mjs.sha256 --title "$TAG" --notes "$CHANGELOG" --verify-tag
           fi
       - name: Add the version to manifest.json on main
         if: env.SKIP != '1'

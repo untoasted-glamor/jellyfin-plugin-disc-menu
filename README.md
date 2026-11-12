@@ -167,6 +167,20 @@ Test fixtures come from the Sintel DVD only (see [NOTICE](NOTICE)); the Blu-ray 
 `DISC_MENU_PACKS=<folder> npm test` also walks real `hdmv-1` packs in that folder (`test/hdmvpacks.test.ts`, skipped
 without it).
 
+### Menu walk (Node)
+
+`src/walk.ts` runs a pack's menus with no viewer: every page reachable from first play, and what each shown button
+does (plays a Blu-ray playlist from a time, plays a DVD title and chapter, shows another page, or stops), once per
+menu language asked for. A pack built with no media map works: every Blu-ray playlist that shows no menu gets a
+stand-in cell, so its play is reported instead of skipped. `npm run build` also bundles it for Node as
+`web/walk-dist/walk.mjs` (kept out of `dist/`, which the DLL embeds):
+
+```bash
+node web/walk-dist/walk.mjs <pack>/menu.json [--lang eng,jpn] [--max-pages 200]   # one JSON document on stdout
+```
+
+Each release attaches `walk.mjs` and its `walk.mjs.sha256`, for tools that run the walk outside Jellyfin.
+
 ## Release
 
 Either push an annotated tag like `v0.1.0` on `main` (its message becomes the changelog):

@@ -41,6 +41,21 @@ const button = {
   logLevel: "info",
 };
 
+// The walk back end for Node (plan v3, P13): one ES module ARM vendors by sha256 and runs in its menu_preview task.
+// Kept out of dist/, which the DLL embeds.
+/** @type {import("esbuild").BuildOptions} */
+const walk = {
+  entryPoints: ["src/walk-cli.ts"],
+  outfile: "walk-dist/walk.mjs",
+  bundle: true,
+  format: "esm",
+  platform: "node",
+  target: "node20",
+  minify: false,
+  define: { __PLAYER_VERSION__: JSON.stringify(version) },
+  logLevel: "info",
+};
+
 if (serve) {
   await (await esbuild.context(button)).watch();
   const ctx = await esbuild.context(options);
@@ -48,5 +63,5 @@ if (serve) {
   await ctx.serve({ servedir: ".", host: "127.0.0.1", port });
   console.log(`player: http://127.0.0.1:${port}/dist/index.html?pack=../fixtures/sintel/`);
 } else {
-  await Promise.all([esbuild.build(options), esbuild.build(button)]);
+  await Promise.all([esbuild.build(options), esbuild.build(button), esbuild.build(walk)]);
 }
