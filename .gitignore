@@ -6,3 +6,4 @@ artifacts
 publish/
 dist/
 node_modules/
+web/walk-dist/
